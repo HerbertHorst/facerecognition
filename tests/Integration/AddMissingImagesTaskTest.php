@@ -37,6 +37,9 @@ use OCA\FaceRecognition\BackgroundJob\Tasks\AddMissingImagesTask;
 
 use OCA\FaceRecognition\Model\ModelManager;
 
+/**
+ * @group DB
+ */
 class AddMissingImagesTaskTest extends IntegrationTestCase {
 
 	/**
@@ -103,10 +106,15 @@ class AddMissingImagesTaskTest extends IntegrationTestCase {
 
 		$this->doMissingImageScan($this->user);
 
-		// We should find 3 images only - foo2.jpg, foo3.png and dir/foo6.png. BMP mimetype (foo5.bmp) is not enabled by default.
+		// foo2.jpg, foo3.png and dir/foo6.png are found, and everything under
+		// dir_nomedia is skipped. dir/foo5.bmp is skipped as well: BMP is not a
+		// photographic format, so it is never enabled by the backend detection,
+		// only by an explicit administrator setting.
+		$expectedImages = 3;
+
 		$imageMapper = $this->container->query('OCA\FaceRecognition\Db\ImageMapper');
-		$this->assertEquals(3, count($imageMapper->findImagesWithoutFaces($this->user, ModelManager::DEFAULT_FACE_MODEL_ID)));
-		$this->assertEquals(3, $this->context->propertyBag['AddMissingImagesTask_insertedImages']);
+		$this->assertEquals($expectedImages, count($imageMapper->findImagesWithoutFaces($this->user, ModelManager::DEFAULT_FACE_MODEL_ID)));
+		$this->assertEquals($expectedImages, $this->context->propertyBag['AddMissingImagesTask_insertedImages']);
 	}
 
 	/**

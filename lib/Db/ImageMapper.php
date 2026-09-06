@@ -46,7 +46,7 @@ class ImageMapper extends QBMapper {
 	 */
 	public function find(string $userId, int $imageId): ?Image {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'file', 'is_processed', 'error', 'last_processed_time', 'processing_duration')
+		$qb->select('id', 'file', 'is_processed', 'is_refined', 'error', 'last_processed_time', 'processing_duration')
 			->from($this->getTableName(), 'i')
 			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
 			->andWhere($qb->expr()->eq('id', $qb->createNamedParameter($imageId)));
@@ -64,7 +64,7 @@ class ImageMapper extends QBMapper {
 	 */
 	public function findAll(string $userId, int $modelId): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'file', 'is_processed', 'error', 'last_processed_time', 'processing_duration')
+		$qb->select('id', 'file', 'is_processed', 'is_refined', 'error', 'last_processed_time', 'processing_duration')
 			->from($this->getTableName())
 			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
 			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)));
@@ -79,7 +79,7 @@ class ImageMapper extends QBMapper {
 	 */
 	public function findFromFile(string $userId, int $modelId, int $fileId): ?Image {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'is_processed', 'error')
+		$qb->select('id', 'is_processed', 'is_refined', 'error')
 			->from($this->getTableName(), 'i')
 			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
 			->andwhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
@@ -107,6 +107,39 @@ class ImageMapper extends QBMapper {
 		$row = $resultStatement->fetch();
 		$resultStatement->closeCursor();
 		return $row ? (int)$row['id'] : null;
+	}
+
+	/**
+	 * An image of the same file that another user already processed, to reuse
+	 * its analysis instead of running the model again.
+	 *
+	 * A photo that is shared keeps the file id of its owner in every account,
+	 * so the same photo appears in the table of several users with the same
+	 * file id. This returns the analyzed copy, if there is one. Only results
+	 * without error can be trusted.
+	 *
+	 * @param int $fileId File id of the image to get a duplicate of
+	 * @param int $modelId Model the image was analyzed with
+	 * @param string $excludeUser User that must not be matched
+	 *
+	 * @return Image|null The analyzed image of another user, or null when there is none
+	 */
+	public function findProcessedDuplicate(int $fileId, int $modelId, string $excludeUser): ?Image {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id', 'user', 'file', 'model', 'is_processed', 'is_refined', 'error', 'last_processed_time', 'processing_duration')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('file', $qb->createNamedParameter($fileId)))
+			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
+			->andWhere($qb->expr()->eq('is_processed', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)))
+			->andWhere($qb->expr()->isNull('error'))
+			->andWhere($qb->expr()->neq('user', $qb->createNamedParameter($excludeUser)))
+			->setMaxResults(1);
+
+		try {
+			return $this->findEntity($qb);
+		} catch (DoesNotExistException $e) {
+			return null;
+		}
 	}
 
 	public function countImages(int $model): int {
@@ -139,15 +172,115 @@ class ImageMapper extends QBMapper {
 		return (int)$data[0];
 	}
 
-	public function avgProcessingDuration(int $model): int {
+	/**
+	 * Images that the analysis still has to take, which is exactly what
+	 * findImagesToProcess() returns, or findImagesWithoutFaces() when the
+	 * refinement is disabled.
+	 *
+	 * The progress is counted with the same condition that picks the work, so
+	 * that both cannot drift apart. Counting the refined images instead would
+	 * leave the images that failed out of the progress forever: they stay
+	 * processed and not refined, and they are not taken again until the user
+	 * resets the errors.
+	 *
+	 * @param int $model Model to count the images of
+	 * @param bool $refinementEnabled Whether the refinement pass is enabled
+	 *
+	 * @return int Images that are left to analyze
+	 */
+	public function countRemainingImages(int $model, bool $refinementEnabled): int {
+		$qb = $this->db->getQueryBuilder();
+		$query = $qb
+			->select($qb->createFunction('COUNT(' . $qb->getColumnName('id') . ')'))
+			->from($this->getTableName())
+			->where($qb->expr()->eq('model', $qb->createNamedParameter($model)));
+
+		$notProcessed = $qb->expr()->eq('is_processed', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL));
+		if ($refinementEnabled) {
+			$query->andWhere($qb->expr()->orX(
+				$notProcessed,
+				$qb->expr()->andX(
+					$qb->expr()->eq('is_refined', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)),
+					$qb->expr()->isNull('error')
+				)
+			));
+		} else {
+			$query->andWhere($notProcessed);
+		}
+
+		$resultStatement = $query->executeQuery();
+		$data = $resultStatement->fetch(\PDO::FETCH_NUM);
+		$resultStatement->closeCursor();
+
+		return (int)$data[0];
+	}
+
+	/**
+	 * Images of the user that were refined: processed and analyzed again with
+	 * the current model at maximum quality.
+	 *
+	 * @return int
+	 */
+	public function countUserRefinedImages(string $userId, int $model): int {
+		$qb = $this->db->getQueryBuilder();
+		$query = $qb
+			->select($qb->createFunction('COUNT(' . $qb->getColumnName('id') . ')'))
+			->from($this->getTableName())
+			->where($qb->expr()->eq('user', $qb->createParameter('user')))
+			->andWhere($qb->expr()->eq('model', $qb->createParameter('model')))
+			->andWhere($qb->expr()->eq('is_refined', $qb->createParameter('is_refined')))
+			->setParameter('user', $userId)
+			->setParameter('model', $model)
+			->setParameter('is_refined', True, IQueryBuilder::PARAM_BOOL);
+		$resultStatement = $query->executeQuery();
+		$data = $resultStatement->fetch(\PDO::FETCH_NUM);
+		$resultStatement->closeCursor();
+
+		return (int)$data[0];
+	}
+
+	/**
+	 * Average time an image took to be analyzed, in milliseconds.
+	 *
+	 * The two passes cost very different amounts: the fast one works on a small
+	 * image with the HOG model, the refinement one on a full-size image with the
+	 * current model. Averaging both together gives a time that is far too
+	 * optimistic for the refinement that is left, which is the only work
+	 * remaining once the fast pass went over the library. So $refined asks for
+	 * the duration of the refined images only, which is what that work costs.
+	 *
+	 * While no image was refined yet there is nothing to average, and the fast
+	 * pass durations are all there is. They underestimate the refinement, but it
+	 * is the only estimate available, and it is right again as soon as the first
+	 * image is refined.
+	 *
+	 * @param int $model Model to get the average of
+	 * @param bool $refined Whether to average the refined images only
+	 *
+	 * @return int Average duration in milliseconds, 0 when there is nothing to average
+	 */
+	public function avgProcessingDuration(int $model, bool $refined = false): int {
+		$duration = $this->queryAvgProcessingDuration($model, $refined);
+		if ($refined && $duration === 0) {
+			$duration = $this->queryAvgProcessingDuration($model, false);
+		}
+		return $duration;
+	}
+
+	private function queryAvgProcessingDuration(int $model, bool $refined): int {
 		$qb = $this->db->getQueryBuilder();
 		$query = $qb
 			->select($qb->createFunction('AVG(' . $qb->getColumnName('processing_duration') . ')'))
 			->from($this->getTableName())
 			->where($qb->expr()->eq('model', $qb->createParameter('model')))
-			->andWhere($qb->expr()->eq('is_processed', $qb->createParameter('is_processed')))
-			->setParameter('model', $model)
-			->setParameter('is_processed', True);
+			->setParameter('model', $model);
+		if ($refined) {
+			$query->andWhere($qb->expr()->eq('is_refined', $qb->createParameter('is_refined')))
+			      ->setParameter('is_refined', True, IQueryBuilder::PARAM_BOOL);
+		} else {
+			$query->andWhere($qb->expr()->eq('is_processed', $qb->createParameter('is_processed')))
+			      ->setParameter('is_processed', True);
+		}
 		$resultStatement = $query->executeQuery();
 		$data = $resultStatement->fetch(\PDO::FETCH_NUM);
 		$resultStatement->closeCursor();
@@ -181,7 +314,7 @@ class ImageMapper extends QBMapper {
 	 * @param IUser|null $user User for which to get images for. If not given, all images from instance are returned.
 	 * @param int $modelId Model Id to get images for.
 	 */
-	public function findImagesWithoutFaces(IUser $user = null, int $modelId): array {
+	public function findImagesWithoutFaces(?IUser $user, int $modelId): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb
 			->select(['id', 'user', 'file', 'model'])
@@ -189,6 +322,40 @@ class ImageMapper extends QBMapper {
 			->where($qb->expr()->eq('is_processed',  $qb->createParameter('is_processed')))
 			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
 			->setParameter('is_processed', false, IQueryBuilder::PARAM_BOOL);
+		if (!is_null($user)) {
+			$qb->andWhere($qb->expr()->eq('user', $qb->createNamedParameter($user->getUID())));
+		}
+		return $this->findEntities($qb);
+	}
+
+	/**
+	 * Images that have to be analyzed in the current run: the ones that were
+	 * never processed, and the ones that were only analyzed in the fast pass and
+	 * still have to be refined with the current model at maximum quality.
+	 *
+	 * An image that failed is left out, exactly as it was before the refinement
+	 * existed: a failure leaves the image processed, not refined and with its
+	 * error recorded, and taking it again on every run would mean retrying the
+	 * files that can never be analyzed for as long as they exist, competing for
+	 * the time of every run. It keeps whatever the fast pass found and waits for
+	 * an explicit `occ face:reset --error`.
+	 *
+	 * @param IUser|null $user User for which to get images for. If not given, all images from instance are returned.
+	 * @param int $modelId Model Id to get images for.
+	 */
+	public function findImagesToProcess(?IUser $user, int $modelId): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb
+			->select(['id', 'user', 'file', 'model'])
+			->from($this->getTableName())
+			->where($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
+			->andWhere($qb->expr()->orX(
+				$qb->expr()->eq('is_processed', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)),
+				$qb->expr()->andX(
+					$qb->expr()->eq('is_refined', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)),
+					$qb->expr()->isNull('error')
+				)
+			));
 		if (!is_null($user)) {
 			$qb->andWhere($qb->expr()->eq('user', $qb->createNamedParameter($user->getUID())));
 		}
@@ -211,10 +378,11 @@ class ImageMapper extends QBMapper {
 		$qb->select('i.id', 'i.file')
 			->from($this->getTableName(), 'i')
 			->innerJoin('i', 'facerecog_faces', 'f', $qb->expr()->eq('f.image', 'i.id'))
-			->innerJoin('i', 'facerecog_persons', 'p', $qb->expr()->eq('f.person', 'p.id'))
+			->innerJoin('f', 'facerecog_clusters', 'c', $qb->expr()->eq('f.cluster', 'c.id'))
+			->innerJoin('c', 'facerecog_persons', 'p', $qb->expr()->eq('c.person', 'p.id'))
 			->where($qb->expr()->eq('p.user', $qb->createNamedParameter($userId)))
-			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($model)))
-			->andWhere($qb->expr()->eq('is_processed', $qb->createNamedParameter(True)))
+			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($model)))
+			->andWhere($qb->expr()->eq('i.is_processed', $qb->createNamedParameter(True)))
 			->andWhere($qb->expr()->like($qb->func()->lower('p.name'), $qb->createParameter('query')));
 
 		$query = '%' . $this->db->escapeLikeParameter(strtolower($name)) . '%';
@@ -231,10 +399,11 @@ class ImageMapper extends QBMapper {
 		$qb->select('i.file')
 			->from($this->getTableName(), 'i')
 			->innerJoin('i', 'facerecog_faces', 'f', $qb->expr()->eq('f.image', 'i.id'))
-			->innerJoin('f', 'facerecog_persons', 'p', $qb->expr()->eq('f.person', 'p.id'))
+			->innerJoin('f', 'facerecog_clusters', 'c', $qb->expr()->eq('f.cluster', 'c.id'))
+			->innerJoin('c', 'facerecog_persons', 'p', $qb->expr()->eq('c.person', 'p.id'))
 			->where($qb->expr()->eq('p.user', $qb->createNamedParameter($userId)))
-			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
-			->andWhere($qb->expr()->eq('is_processed', $qb->createNamedParameter(True)))
+			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($modelId)))
+			->andWhere($qb->expr()->eq('i.is_processed', $qb->createNamedParameter(True)))
 			->andWhere($qb->expr()->eq('p.name', $qb->createNamedParameter($name)))
 			->orderBy('i.file', 'DESC');
 
@@ -249,10 +418,11 @@ class ImageMapper extends QBMapper {
 		$qb->select($qb->func()->count('*'))
 			->from($this->getTableName(), 'i')
 			->innerJoin('i', 'facerecog_faces', 'f', $qb->expr()->eq('f.image', 'i.id'))
-			->innerJoin('f', 'facerecog_persons', 'p', $qb->expr()->eq('f.person', 'p.id'))
+			->innerJoin('f', 'facerecog_clusters', 'c', $qb->expr()->eq('f.cluster', 'c.id'))
+			->innerJoin('c', 'facerecog_persons', 'p', $qb->expr()->eq('c.person', 'p.id'))
 			->where($qb->expr()->eq('p.user', $qb->createNamedParameter($userId)))
-			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
-			->andWhere($qb->expr()->eq('is_processed', $qb->createNamedParameter(True)))
+			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($modelId)))
+			->andWhere($qb->expr()->eq('i.is_processed', $qb->createNamedParameter(True)))
 			->andWhere($qb->expr()->eq('p.name', $qb->createNamedParameter($name)));
 
 		$result = $qb->executeQuery();
@@ -266,14 +436,24 @@ class ImageMapper extends QBMapper {
 	 * Writes to DB that image has been processed. Previously found faces are deleted and new ones are inserted.
 	 * If there is exception, its stack trace is also updated.
 	 *
+	 * The faces are only replaced on success. On a failure the old faces are
+	 * left alone, so an image that already had faces keeps them, and with them
+	 * the person: what the fast pass found is not lost because the refinement
+	 * failed. The image also stays not refined, but that alone does not put it
+	 * back in the queue, see findImagesToProcess(). The same happens when
+	 * $replaceFaces is false, which is what the "image too small" skip uses to
+	 * keep whatever was found before.
+	 *
 	 * @param Image $image Image to be updated
 	 * @param Face[] $faces Faces to insert
 	 * @param int $duration Processing time, in milliseconds
 	 * @param \Exception|null $e Any exception that happened during image processing
+	 * @param bool $refined Whether this was the second, high quality pass that replaces the fast-pass faces
+	 * @param bool $replaceFaces Whether to replace the old faces with the new ones. False keeps them.
 	 *
 	 * @return void
 	 */
-	public function imageProcessed(Image $image, array $faces, int $duration, \Exception $e = null): void {
+	public function imageProcessed(Image $image, array $faces, int $duration, ?\Exception $e = null, bool $refined = false, bool $replaceFaces = true): void {
 		$this->db->beginTransaction();
 		try {
 			// Update image itself
@@ -283,32 +463,40 @@ class ImageMapper extends QBMapper {
 				$error = substr($e->getMessage(), 0, 1024);
 			}
 
+			// A failure leaves the image not refined, so that it is taken again
+			// on the next run. A success is refined according to the pass.
+			$isRefined = $refined && $e === null;
+
 			$qb = $this->db->getQueryBuilder();
 			$qb->update($this->getTableName())
 				->set("is_processed", $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
+				->set("is_refined", $qb->createNamedParameter($isRefined, IQueryBuilder::PARAM_BOOL))
 				->set("error", $qb->createNamedParameter($error))
 				->set("last_processed_time", $qb->createNamedParameter(new \DateTime(), IQueryBuilder::PARAM_DATE))
 				->set("processing_duration", $qb->createNamedParameter($duration))
 				->where($qb->expr()->eq('id', $qb->createNamedParameter($image->id)))
 				->executeStatement();
 
-			// Delete all previously detected faces, but keep manually added ones.
-			// Manual faces (is_manual = true) are user-curated and have no model
-			// descriptor, so re-processing would otherwise silently destroy them.
-			//
-			$qb = $this->db->getQueryBuilder();
-			$qb->delete('facerecog_faces')
-				->where($qb->expr()->eq('image', $qb->createNamedParameter($image->id)))
-				->andWhere($qb->expr()->orX(
-					$qb->expr()->isNull('is_manual'),
-					$qb->expr()->eq('is_manual', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
-				))
-				->executeStatement();
+			if ($e === null && $replaceFaces) {
+				// Delete the faces the model found last time, to replace them with
+				// the new ones, but keep the ones the user added by hand. A manual
+				// face is not something the analysis can produce again, so deleting
+				// it here would silently discard the user's own work.
+				//
+				$qb = $this->db->getQueryBuilder();
+				$qb->delete('facerecog_faces')
+					->where($qb->expr()->eq('image', $qb->createNamedParameter($image->id)))
+					->andWhere($qb->expr()->orX(
+						$qb->expr()->isNull('is_manual'),
+						$qb->expr()->eq('is_manual', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
+					))
+					->executeStatement();
 
-			// Insert all faces
-			//
-			foreach ($faces as $face) {
-				$this->faceMapper->insertFace($face, $this->db);
+				// Insert all faces
+				//
+				foreach ($faces as $face) {
+					$this->faceMapper->insertFace($face, $this->db);
+				}
 			}
 
 			$this->db->commit();
@@ -321,6 +509,10 @@ class ImageMapper extends QBMapper {
 	/**
 	 * Resets image by deleting all associated faces and prepares it to be processed again
 	 *
+	 * The file changed, so nothing that was obtained from it holds any more: the
+	 * image goes back to not processed and not refined, and both passes take it
+	 * again. Leaving it refined would count it as finished while it is pending.
+	 *
 	 * @param Image $image Image to reset
 	 *
 	 * @return void
@@ -329,11 +521,32 @@ class ImageMapper extends QBMapper {
 		$qb = $this->db->getQueryBuilder();
 		$qb->update($this->getTableName())
 			->set("is_processed", $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
+			->set("is_refined", $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
 			->set("error", $qb->createNamedParameter(null))
 			->set("last_processed_time", $qb->createNamedParameter(null))
 			->where($qb->expr()->eq('user', $qb->createNamedParameter($image->getUser())))
 			->andWhere($qb->expr()->eq('file', $qb->createNamedParameter($image->getFile())))
 			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($image->getModel())))
+			->executeStatement();
+	}
+
+	/**
+	 * Marks all the images of the user and model as not refined, so the
+	 * refinement pass analyzes them again (e.g. after increasing the size of
+	 * the images). The faces and clusters are kept, and the re-processing
+	 * replaces the faces and inherits their clusters.
+	 *
+	 * @param string $userId User to reset the refinement of
+	 * @param int $modelId Model to reset the refinement of
+	 *
+	 * @return void
+	 */
+	public function resetRefined(string $userId, int $modelId): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->update($this->getTableName())
+			->set("is_refined", $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
+			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($modelId)))
 			->executeStatement();
 	}
 

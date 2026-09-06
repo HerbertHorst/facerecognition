@@ -28,6 +28,8 @@ use OCP\AppFramework\Http;
 
 use OCA\FaceRecognition\Controller\ApiController;
 
+use OCA\FaceRecognition\Db\Cluster;
+use OCA\FaceRecognition\Db\ClusterMapper;
 use OCA\FaceRecognition\Db\Face;
 use OCA\FaceRecognition\Db\FaceMapper;
 use OCA\FaceRecognition\Db\Image;
@@ -39,11 +41,11 @@ use OCA\FaceRecognition\Service\SettingsService;
 use OCA\FaceRecognition\Service\UrlService;
 
 /**
- * Validation and edge-case coverage for the manual-face API endpoints
+ * Validation and edge case coverage of the manual face endpoints
  * (addManualFace / reassignFace). The collaborators are mocked and real
- * entities are used as fixtures (their getters are magic __call methods,
- * which PHPUnit mocks cannot stub), so these tests exercise the controller
- * logic only — no database is touched.
+ * entities are used as fixtures, since their getters are magic __call methods
+ * that a PHPUnit mock cannot stub, so what is exercised here is the logic of
+ * the controller alone and no database is touched.
  */
 class ManualFaceApiTest extends TestCase {
 
@@ -53,6 +55,8 @@ class ManualFaceApiTest extends TestCase {
 	private $faceMapper;
 	/** @var ImageMapper */
 	private $imageMapper;
+	/** @var ClusterMapper */
+	private $clusterMapper;
 	/** @var PersonMapper */
 	private $personMapper;
 	/** @var SettingsService */
@@ -68,6 +72,7 @@ class ManualFaceApiTest extends TestCase {
 		$request               = $this->createMock(IRequest::class);
 		$this->faceMapper      = $this->createMock(FaceMapper::class);
 		$this->imageMapper     = $this->createMock(ImageMapper::class);
+		$this->clusterMapper   = $this->createMock(ClusterMapper::class);
 		$this->personMapper    = $this->createMock(PersonMapper::class);
 		$this->settingsService = $this->createMock(SettingsService::class);
 		$this->urlService      = $this->createMock(UrlService::class);
@@ -77,6 +82,7 @@ class ManualFaceApiTest extends TestCase {
 			$request,
 			$this->faceMapper,
 			$this->imageMapper,
+			$this->clusterMapper,
 			$this->personMapper,
 			$this->settingsService,
 			$this->urlService,
@@ -94,6 +100,15 @@ class ManualFaceApiTest extends TestCase {
 		$person->setId($id);
 		$person->setName($name);
 		return $person;
+	}
+
+	private function makeCluster(int $id, ?int $personId = null): Cluster {
+		$cluster = new Cluster();
+		$cluster->setId($id);
+		$cluster->setUser(self::USER);
+		$cluster->setModel(1);
+		$cluster->setPerson($personId);
+		return $cluster;
 	}
 
 	// --- addManualFace ----------------------------------------------------
@@ -148,7 +163,11 @@ class ManualFaceApiTest extends TestCase {
 		$image->setId(10);
 		$this->imageMapper->method('findFromFile')->willReturn($image);
 
-		$this->personMapper->method('findByName')->willReturn([$this->makePerson(5, 'Alice')]);
+		$this->personMapper->method('findOrCreateByName')->willReturn($this->makePerson(5, 'Alice'));
+
+		// The face gets a cluster of its own, pointing at the person.
+		$this->clusterMapper->method('create')->willReturn(7);
+		$this->clusterMapper->expects($this->once())->method('setPerson')->with(7, 5);
 
 		$this->faceMapper->method('insertManualFace')
 			->willReturnCallback(function (Face $face) {
@@ -161,11 +180,43 @@ class ManualFaceApiTest extends TestCase {
 		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
 		$data = $resp->getData();
 		$this->assertEquals(100, $data['faceId']);
+		$this->assertEquals(7, $data['clusterId']);
 		$this->assertEquals(5, $data['personId']);
 		$this->assertEquals('Alice', $data['name']);
 		// useForClustering=true: the face is queued for the background descriptor
 		// task, which will decide whether a face is actually there.
 		$this->assertTrue($data['clusteringQueued']);
+	}
+
+	public function testAddManualFaceStoresPixelsOfTheOriginalImage() {
+		$this->enableUser();
+
+		$file = $this->createMock(File::class);
+		$this->urlService->method('getFileNode')->with(42)->willReturn($file);
+
+		$image = new Image();
+		$image->setId(10);
+		$this->imageMapper->method('findFromFile')->willReturn($image);
+		$this->personMapper->method('findOrCreateByName')->willReturn($this->makePerson(5, 'Alice'));
+		$this->clusterMapper->method('create')->willReturn(7);
+
+		$inserted = null;
+		$this->faceMapper->method('insertManualFace')
+			->willReturnCallback(function (Face $face) use (&$inserted) {
+				$face->setId(100);
+				$inserted = $face;
+				return $face;
+			});
+
+		$this->controller->addManualFace(42, 'Alice', 0.25, 0.5, 0.2, 0.1, 800, 600, false);
+
+		$this->assertNotNull($inserted);
+		$this->assertEquals(200, $inserted->getX());
+		$this->assertEquals(300, $inserted->getY());
+		$this->assertEquals(160, $inserted->getWidth());
+		$this->assertEquals(60, $inserted->getHeight());
+		$this->assertEquals(7, $inserted->getCluster());
+		$this->assertTrue((bool) $inserted->getIsManual());
 	}
 
 	public function testAddManualFaceDoesNotQueueClusteringByDefault() {
@@ -178,7 +229,8 @@ class ManualFaceApiTest extends TestCase {
 		$image->setId(10);
 		$this->imageMapper->method('findFromFile')->willReturn($image);
 
-		$this->personMapper->method('findByName')->willReturn([$this->makePerson(5, 'Alice')]);
+		$this->personMapper->method('findOrCreateByName')->willReturn($this->makePerson(5, 'Alice'));
+		$this->clusterMapper->method('create')->willReturn(7);
 
 		$this->faceMapper->method('insertManualFace')
 			->willReturnCallback(function (Face $face) {
@@ -221,27 +273,58 @@ class ManualFaceApiTest extends TestCase {
 		$this->assertEquals(Http::STATUS_FORBIDDEN, $resp->getStatus());
 	}
 
-	public function testReassignFaceHappyPath() {
+	public function testReassignFaceDetachesItFromItsCluster() {
 		$this->enableUser();
 
 		$face = new Face();
 		$face->setImage(10);
+		$face->setCluster(3);
 		$this->faceMapper->method('find')->willReturn($face);
 
 		$this->imageMapper->method('find')->willReturn(new Image());
+		$this->personMapper->method('findOrCreateByName')->willReturn($this->makePerson(5, 'Bob'));
 
-		$this->personMapper->method('findByName')->willReturn([$this->makePerson(5, 'Bob')]);
+		// The face leaves its cluster and lands in one of the named person.
+		$this->clusterMapper->expects($this->once())
+			->method('detachFace')
+			->with(3, 100, 5)
+			->willReturn($this->makeCluster(8, 5));
 
+		// And it is marked manual, so re-analyzing the file does not undo it.
 		$this->faceMapper->expects($this->once())
-			->method('reassignFace')
-			->with(100, 5);
+			->method('markFaceManual')
+			->with(100);
 
 		$resp = $this->controller->reassignFace(100, 'Bob');
 
 		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
 		$data = $resp->getData();
 		$this->assertEquals(100, $data['faceId']);
+		$this->assertEquals(8, $data['clusterId']);
 		$this->assertEquals(5, $data['personId']);
 		$this->assertEquals('Bob', $data['name']);
+	}
+
+	public function testReassignFaceWithoutClusterGetsANewOne() {
+		$this->enableUser();
+
+		// The clustering has not reached this face yet.
+		$face = new Face();
+		$face->setImage(10);
+		$this->faceMapper->method('find')->willReturn($face);
+
+		$this->imageMapper->method('find')->willReturn(new Image());
+		$this->personMapper->method('findOrCreateByName')->willReturn($this->makePerson(5, 'Bob'));
+
+		$this->clusterMapper->expects($this->never())->method('detachFace');
+		$this->clusterMapper->method('create')->willReturn(9);
+		$this->clusterMapper->expects($this->once())->method('setPerson')->with(9, 5);
+		$this->clusterMapper->expects($this->once())->method('attachFaces')->with([100], 9);
+		$this->faceMapper->expects($this->once())->method('markFaceManual')->with(100);
+
+		$resp = $this->controller->reassignFace(100, 'Bob');
+
+		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
+		$this->assertEquals(9, $resp->getData()['clusterId']);
 	}
 }

@@ -46,8 +46,7 @@ use OCA\FaceRecognition\Service\FaceManagementService;
 use OCA\FaceRecognition\Service\FileService;
 
 use OCA\FaceRecognition\Helper\CommandLock;
-
-use OCP\Image as OCP_Image;
+use OCA\FaceRecognition\Helper\ImageUtil;
 
 class MigrateCommand extends Command {
 
@@ -282,13 +281,38 @@ class MigrateCommand extends Command {
 		}
 
 		$localPath = $this->fileService->getLocalFile($file);
+		if ($localPath === null) {
+			return null;
+		}
 
-		$image = new OCP_Image();
-		$image->loadFromFile($localPath);
-		if ($image->getOrientation() > 1) {
+		// The models only read JPEG and PNG, so any other format has to be
+		// written down decoded. It is loaded oriented, the way the backend that
+		// analyzed it saw the image, since the faces to migrate were found
+		// there and their coordinates have to keep meaning the same.
+		if (!in_array($file->getMimeType(), ['image/jpeg', 'image/png'], true)) {
+			$loaded = ImageUtil::loadFromPath($localPath);
+			if ($loaded === null) {
+				return null;
+			}
+
 			$tempPath = $this->fileService->getTemporaryFile();
-			$image->fixOrientation();
-			$image->save($tempPath, 'image/png');
+			$loaded->save($tempPath, 'image/png');
+			return $tempPath;
+		}
+
+		// The model reads this one as it is, so the only reason to copy it is
+		// the rotation. The orientation is not fixed on load so we can still
+		// ask for it: OCP\Image keeps the EXIF data it read, and does not mark
+		// the image as already oriented, so fixing it twice rotates it twice.
+		$loaded = ImageUtil::loadFromPath($localPath, false);
+		if ($loaded === null) {
+			return null;
+		}
+
+		if ($loaded->getOrientation() > 1) {
+			$tempPath = $this->fileService->getTemporaryFile();
+			$loaded->fixOrientation();
+			$loaded->save($tempPath, 'image/png');
 			return $tempPath;
 		}
 

@@ -33,6 +33,7 @@ use OCP\IUserManager;
 
 use OCA\FaceRecognition\Db\ImageMapper;
 use OCA\FaceRecognition\Db\FaceMapper;
+use OCA\FaceRecognition\Db\ClusterMapper;
 use OCA\FaceRecognition\Db\PersonMapper;
 
 use OCA\FaceRecognition\Service\SettingsService;
@@ -48,6 +49,9 @@ class StatsCommand extends Command {
 	/** @var FaceMapper */
 	protected $faceMapper;
 
+	/** @var ClusterMapper */
+	protected $clusterMapper;
+
 	/** @var PersonMapper */
 	protected $personMapper;
 
@@ -58,12 +62,14 @@ class StatsCommand extends Command {
 	 * @param IUserManager $userManager
 	 * @param ImageMapper $imageMapper
 	 * @param FaceMapper $faceMapper
+	 * @param ClusterMapper $clusterMapper
 	 * @param PersonMapper $personMapper
 	 * @param SettingsService $settingsService
 	 */
 	public function __construct(IUserManager    $userManager,
 	                            ImageMapper     $imageMapper,
 	                            FaceMapper      $faceMapper,
+	                            ClusterMapper   $clusterMapper,
 	                            PersonMapper    $personMapper,
 	                            SettingsService $settingsService)
 	{
@@ -72,6 +78,7 @@ class StatsCommand extends Command {
 		$this->userManager     = $userManager;
 		$this->imageMapper     = $imageMapper;
 		$this->faceMapper      = $faceMapper;
+		$this->clusterMapper   = $clusterMapper;
 		$this->personMapper    = $personMapper;
 		$this->settingsService = $settingsService;
 	}
@@ -142,14 +149,15 @@ class StatsCommand extends Command {
 				$user,
 				$this->imageMapper->countUserImages($user, $modelId),
 				$this->imageMapper->countUserImages($user, $modelId, true),
+				$this->imageMapper->countUserRefinedImages($user, $modelId),
 				$this->faceMapper->countFaces($user, $modelId),
-				$this->personMapper->countClusters($user, $modelId),
+				$this->clusterMapper->countClusters($user, $modelId),
 				$this->personMapper->countPersons($user, $modelId)
 			];
 		}
 
 		$table = new Table($output);
-		$table->setHeaders(['User', 'Images', 'Processed', 'Faces', 'Clusters', 'Persons'])->setRows($stats);
+		$table->setHeaders(['User', 'Images', 'Processed', 'Refined', 'Faces', 'Clusters', 'Persons'])->setRows($stats);
 		$table->render();
 	}
 
@@ -163,8 +171,9 @@ class StatsCommand extends Command {
 				'user'     => $user,
 				'images'   => $this->imageMapper->countUserImages($user, $modelId),
 				'processed'=> $this->imageMapper->countUserImages($user, $modelId, true),
+				'refined'  => $this->imageMapper->countUserRefinedImages($user, $modelId),
 				'faces'    => $this->faceMapper->countFaces($user, $modelId),
-				'clusters' => $this->personMapper->countClusters($user, $modelId),
+				'clusters' => $this->clusterMapper->countClusters($user, $modelId),
 				'persons'  => $this->personMapper->countPersons($user, $modelId)
 			);
 		}

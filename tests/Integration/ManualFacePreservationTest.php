@@ -33,6 +33,8 @@ use OCA\FaceRecognition\Model\ModelManager;
  * model-detected faces. Manually added faces (is_manual = true) carry no model
  * descriptor and cannot be re-detected, so they must survive re-processing.
  * Before the fix the blanket DELETE wiped them, silently destroying user data.
+ *
+ * @group DB
  */
 class ManualFacePreservationTest extends IntegrationTestCase {
 

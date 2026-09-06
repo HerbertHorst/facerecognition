@@ -35,6 +35,8 @@ use OCA\FaceRecognition\Model\ModelManager;
  * clustering should get a real descriptor when the model finds a face in the
  * marked region, and should be excluded from clustering (no crash, no fake
  * descriptor) when it does not.
+ *
+ * @group DB
  */
 class ManualFaceDescriptorTaskTest extends IntegrationTestCase {
 

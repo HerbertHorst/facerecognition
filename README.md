@@ -52,7 +52,7 @@ If you'd like to support the creation and maintenance of this software, consider
 
 #### Requirements
 
- * Nextcloud 22+
+ * Nextcloud 34
  * [Dlib PHP bindings](https://github.com/goodspb/pdlib)
  * [PHP Bzip2](https://www.php.net/manual/en/book.bzip2.php)
  * 1GB of RAM
@@ -102,14 +102,45 @@ the Nextcloud settings panel. This configuration will depend on your
 installation and has a direct impact on memory consumption. For details and
 advanced information read the documentation about [Temporary files](https://github.com/matiasdelellis/facerecognition/wiki/Settings#temporary-files).
 
+#### Supported image formats
+
+JPEG and PNG are analyzed on any setup. On top of those, HEIC/HEIF, TIFF and
+AVIF are analyzed when the image backend of your server can decode them:
+
+* Decoding the images locally, the three depend on the Imagick extension, when
+  it was built with the proper delegates (libheif, libtiff, libavif).
+* With an [Imaginary](https://github.com/h2non/imaginary) service, configured
+  with the `preview_imaginary_url` key, the three are analyzed.
+
+GIF, BMP and WebP are deliberately left out, even though the local backends read
+them: they are the formats of memes, stickers and screenshots, so analyzing them
+mostly fills the results with the faces of drawings and video captures, that you
+then have to reject by hand.
+
+The requirements check that runs at the start of `occ face:background_job`
+writes the resulting list to the log, in debug level. To force any additional
+mimetype, GIF and WebP among them, add it to the
+`enabledFaceRecognitionMimetype` array in `config.php`.
+
 #### Test the application
 
 We recommend test the application intensively before proceeding to analyze the
 real data of the users. For this you can create a new user in your Nextcloud
 instance and upload some photos from the internet. Then you must run the
 `occ face:background_job -u new_user -t 900` command for this user and evaluate
-the result. For details and advanced information read the documentation of this
-command below.
+the result. For details and advanced information read the [documentation of this
+command](doc/occ-commands.md#face-background_job).
+
+If you just want to try the application, or to test your changes without
+touching your own instance, there is a docker compose setup in the [`docker/`](docker/)
+directory that brings up a Nextcloud instance with the application and all its
+requirements already installed:
+
+```bash
+docker compose -f docker/compose.yaml up -d --build
+```
+
+See [docker/README.md](docker/README.md) for details.
 
 #### Schedule background job
 
@@ -117,124 +148,45 @@ The application is designed to run as a scheduled task. This allows analyze the
 photos and showing the results to the user progressively. You can read about
 some ways to configure it within our documentation about [Schedule Background Task](https://github.com/matiasdelellis/facerecognition/wiki/Schedule-Background-Task).
 
+To speed up the analysis on machines with several cores, the image analysis can
+run in parallel with `occ face:background_job --workers=4`. The command then
+acts as a coordinator: it runs the file synchronization and the clustering
+itself, and spawns the workers that analyze the images, each one taking its own
+share. Every worker loads its own copy of the model in memory, so the memory
+needed grows with the number of workers. It requires the `pcntl` extension
+(standard on Linux, macOS and FreeBSD, not available on Windows), and is not
+recommended on instances that use SQLite. See
+[doc/occ-commands.md](doc/occ-commands.md#face-background_job) for details.
+
+## How it works inside
+
+The [`doc/`](doc/) directory documents the parts that are not obvious from the
+code, for whoever wants to change them:
+
+ * [doc/clustering.md](doc/clustering.md): how the faces are grouped, why the
+   clusters are grown instead of rebuilt, what a run costs and how it is bounded,
+   and how the clusters of one person are proposed to be linked.
+ * [doc/data-model.md](doc/data-model.md): what each table and each row means,
+   and in particular the difference between a cluster and a person.
+ * [doc/occ-commands.md](doc/occ-commands.md): exhaustive reference of every
+   `occ` command, its options and behavior.
+
 ## occ commands
 
-The application add commands to the [Nexcloud's command-line interface](https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/occ_command.html).
+The application adds commands to the [Nextcloud's command-line interface](https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/occ_command.html).
 
-#### Initial setup
+| Command | Purpose |
+| --- | --- |
+| `occ face:setup` | Configure the memory limit and install the recognition model. |
+| `occ face:background_job` | Analyze images, extract faces and cluster them. |
+| `occ face:sync-albums` | Create/update photo albums per person in the Photos app. |
+| `occ face:reset` | Delete analysis data to start over. |
+| `occ face:migrate` | Migrate faces from one model to another. |
+| `occ face:stats` | Show a summary of images, faces and persons. |
+| `occ face:progress` | Show the progress of the analysis and an ETA. |
 
-`occ face:setup [-M|--memory MEMORY] [-m|--model MODEL]`
+For the exhaustive documentation of every command, its options, examples and
+behavior, see [doc/occ-commands.md](doc/occ-commands.md).
 
-This command is responsible for making the necessary settings to use the
-application.
-
-If `MEMORY` is supplied, it will establish the maximum memory to be used for the
-processing of the images. This value will be limited according to the memory
-available by the system and the php configuration. You can use numbers as bytes
-(1073741824 for 1GB), or subfixed with units (1024M or 1G) but note that it is
-without space.
-
-If `MODEL_ID` is supplied. the pre-trained model for facial recognition will be
-installed.
-
-You must perform both settings before continuing with any application command.
-If you do not supply any of these options, the command will return the current
-configuration.
-
-#### Face analysis
-
-`occ face:background_job [-u|--user_id USER_ID] [-t|--timeout TIMEOUT] [--defer-clustering] [-M|--max_image_area MAX_IMAGE_AREA]`
-
-This command will do all the work. It is responsible for searching the images,
-analyzing them and clustering faces found in them in groups of similar people.
-
-Beware that this command can take a lot of CPU and memory! Before you put it to
-cron job, it is advised to try it out manually first, just to be sure you have
-all requirements and you have enough resources on your machine.
-
-Command is designed to be run continuously, so you will want to schedule it with
-cron to be executed every once in a while, together with a specified timeout. It
-can be run every 15 minutes with timeout of `-t 900` (so, it will stop itself
-automatically after 15 minutes and cron will start it again), or once a day with
-timeout of 2 hours, like `-t 7200`.
-
-If `USER_ID` is supplied, it will just loop over files of a given user. Keep in
-mind that each user must enable the analysis individually, and otherwise this
-command will ignore the user.
-
-If `TIMEOUT` is supplied it will stop after the indicated seconds, and continue
-in the next execution. Use this value in conjunction with the times of the
-scheduled task to distribute the system load during the day.
-
-If `MAX_IMAGE_AREA` is supplied caps the maximum area (in pixels^2) of the image
-to be fed to neural network, effectively lowering needed memory. Use this
-if face detection crashes randomly.
-
-If use the `--defer-clustering` option, it changes the order of execution of the
-process deferring the face clustering at the end of the analysis to get persons
-in a simple execution of the command.
-
-#### Create albums in the Photos app
-
-`face:sync-albums [-u|--user_id USER_ID]`
-
-This command creates photo albums within the Nexcloud Photos app, with photos of
-each person found.
-
-Note that these albums are editable in the Photos app, and any changes will be
-ignored and reverted on the next run of this command.
-
-This command is also designed to be run regularly to sync any user changes, as
-this command is the only one that will update albums.
-
-If `USER_ID` is provided, it will just sync albums for this user.
-
-#### Resetting information
-
-`occ face:reset [--all] [--model] [--image-errors] [--clustering] [-u|--user_id USER_ID]`
-
-This command can completely wipe out all images, faces and cluster of persons.
-It is ideal if you want to start from scratch for any reason.
-
-You must specify if you wish to completely reset the database `[--all]` or just
-the current model `[--model]` and all images must be analyzed again, or or you
-can reset only the clustering of persons `[--clustering]` and only clustering
-needs to be done again, or reset only the images that had errors
-`[--image-errors]` to try to analyze them again.
-
-If `USER_ID` is provided, it will just reset the information of a particular
-user.
-
-#### Migrate models
-
-`occ face:migrate [-m|--model_id MODEL_ID] [-u|--user_id USER_ID]`
-
-This command allows to migrate the faces obtained in a model to a new one. Note
-that the persons name  are not migrated, and the user must rename them again.
-Always is recommended to analyze from scratch any configured model, but you can
-save a lot of time migrating it.
-
-You must specify which model you want to migrate using the `MODEL_ID` option.
-
-If `USER_ID` is provided, just migrate the faces for the given user.
-
-#### Statistics
-
-`occ face:stats [-u|--user_id USER_ID] [-j|--json]`
-
-This command return a summary of the number of images, faces and persons found.
-
-If `USER_ID` is provided, just return the stats for the given user.
-
-If use the `--json` argument, it prints the stats in a json format more suitable
-to parse with other tools.
-
-#### Progress
-
-`occ face:progress`
-
-This command just return the progress of the analysis and an estimated time to
-complete.
-
-If use the `--json` argument, it prints the stats in a json format more suitable
-to parse with other tools.
+To get started, you must first configure the application with `occ face:setup`,
+and then schedule `occ face:background_job` as a cron job.

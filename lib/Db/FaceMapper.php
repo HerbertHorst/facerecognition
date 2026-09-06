@@ -39,7 +39,7 @@ class FaceMapper extends QBMapper {
 
 	public function find (int $faceId): ?Face {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'image', 'person', 'x', 'y', 'width', 'height', 'landmarks', 'descriptor', 'confidence')
+		$qb->select('id', 'image', 'cluster', 'x', 'y', 'width', 'height', 'landmarks', 'descriptor', 'confidence')
 			->from($this->getTableName(), 'f')
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($faceId)));
 		try {
@@ -86,7 +86,7 @@ class FaceMapper extends QBMapper {
 	 */
 	public function findFromFile(string $userId, int $modelId, int $fileId): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'x', 'y', 'width', 'height', 'person', 'confidence', 'is_manual', 'creation_time')
+		$qb->select('f.id', 'x', 'y', 'width', 'height', 'cluster', 'confidence', 'is_manual', 'creation_time')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('i.user', $qb->createParameter('user_id')))
@@ -104,10 +104,10 @@ class FaceMapper extends QBMapper {
 	 *
 	 * @param string $userId User to which faces and associated images belongs to
 	 * @param int $model Model ID
-	 * @param bool $onlyWithoutPersons True if we need to count only faces which are not having person associated for it.
+	 * @param bool $onlyWithoutClusters True if we need to count only faces which are not in a cluster yet.
 	 * If false, all faces are counted.
 	 */
-	public function countFaces(string $userId, int $model, bool $onlyWithoutPersons=false): int {
+	public function countFaces(string $userId, int $model, bool $onlyWithoutClusters=false): int {
 		$qb = $this->db->getQueryBuilder();
 		$qb = $qb
 			->select($qb->createFunction('COUNT(' . $qb->getColumnName('f.id') . ')'))
@@ -115,8 +115,8 @@ class FaceMapper extends QBMapper {
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('user', $qb->createParameter('user')))
 			->andWhere($qb->expr()->eq('model', $qb->createParameter('model')));
-		if ($onlyWithoutPersons) {
-			$qb = $qb->andWhere($qb->expr()->isNull('person'));
+		if ($onlyWithoutClusters) {
+			$qb = $qb->andWhere($qb->expr()->isNull('cluster'));
 		}
 		$query = $qb
 			->setParameter('user', $userId)
@@ -129,15 +129,15 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
-	 * Gets oldest created face from database, for a given user and model, that is not associated with a person.
+	 * Gets oldest created face from database, for a given user and model, that is not in any cluster yet.
 	 *
 	 * @param string $userId User to which faces and associated images belongs to
 	 * @param int $model Model ID
 	 *
 	 * @return Face Oldest face, if any is found
-	 * @throws DoesNotExistException If there is no faces in database without person for a given user and model.
+	 * @throws DoesNotExistException If there is no faces in database without cluster for a given user and model.
 	 */
-	public function getOldestCreatedFaceWithoutPerson(string $userId, int $model) {
+	public function getOldestCreatedFaceWithoutCluster(string $userId, int $model) {
 		$qb = $this->db->getQueryBuilder();
 		$qb
 			->select('f.id', 'f.creation_time')
@@ -145,7 +145,7 @@ class FaceMapper extends QBMapper {
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
 			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($model)))
-			->andWhere($qb->expr()->isNull('person'))
+			->andWhere($qb->expr()->isNull('cluster'))
 			->orderBy('f.creation_time', 'ASC');
 		$cursor = $qb->executeQuery();
 		$row = $cursor->fetch();
@@ -160,7 +160,7 @@ class FaceMapper extends QBMapper {
 
 	public function getFaces(string $userId, int $model): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'f.person', 'f.x', 'f.y', 'f.width', 'f.height', 'f.confidence', 'f.descriptor', 'f.is_groupable')
+		$qb->select('f.id', 'f.cluster', 'f.x', 'f.y', 'f.width', 'f.height', 'f.confidence', 'f.descriptor', 'f.is_groupable')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('user', $qb->createParameter('user')))
@@ -172,7 +172,7 @@ class FaceMapper extends QBMapper {
 
 	public function getGroupableFaces(string $userId, int $model, int $minSize, float $minConfidence): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'f.person')
+		$qb->select('f.id', 'f.cluster')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('user', $qb->createParameter('user')))
@@ -181,7 +181,6 @@ class FaceMapper extends QBMapper {
 			->andWhere($qb->expr()->gte('height', $qb->createParameter('min_size')))
 			->andWhere($qb->expr()->gte('confidence', $qb->createParameter('min_confidence')))
 			->andWhere($qb->expr()->eq('is_groupable', $qb->createParameter('is_groupable')))
-			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]')))
 			->setParameter('user', $userId)
 			->setParameter('model', $model)
 			->setParameter('min_size', $minSize)
@@ -195,9 +194,181 @@ class FaceMapper extends QBMapper {
 		return $rows;
 	}
 
+	/**
+	 * Faces that can be grouped and do not belong to any cluster yet, which are
+	 * the ones the clustering has to place. They are returned oldest first, so
+	 * that repeated runs walk the backlog in a defined order.
+	 *
+	 * @return int[] IDs of the faces
+	 */
+	public function findUnassignedGroupableFaces(string $userId, int $model, int $minSize, float $minConfidence, int $limit): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('f.id')
+			->from($this->getTableName(), 'f')
+			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
+			->where($qb->expr()->eq('user', $qb->createParameter('user')))
+			->andWhere($qb->expr()->eq('model', $qb->createParameter('model')))
+			->andWhere($qb->expr()->isNull('f.cluster'))
+			->andWhere($qb->expr()->gte('width', $qb->createParameter('min_size')))
+			->andWhere($qb->expr()->gte('height', $qb->createParameter('min_size')))
+			->andWhere($qb->expr()->gte('confidence', $qb->createParameter('min_confidence')))
+			->andWhere($qb->expr()->eq('is_groupable', $qb->createParameter('is_groupable')))
+			// A manually added face has no descriptor until the model finds one
+			// in the marked region, and there is nothing to compare it with
+			// until then.
+			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]')))
+			->setParameter('user', $userId)
+			->setParameter('model', $model)
+			->setParameter('min_size', $minSize)
+			->setParameter('min_confidence', $minConfidence)
+			->setParameter('is_groupable', true, IQueryBuilder::PARAM_BOOL)
+			->orderBy('f.id', 'ASC')
+			->setMaxResults($limit);
+
+		$result = $qb->executeQuery();
+		$ids = [];
+		while ($row = $result->fetch()) {
+			$ids[] = (int) $row['id'];
+		}
+		$result->closeCursor();
+
+		return $ids;
+	}
+
+	/**
+	 * Faces that cannot be grouped and do not belong to any cluster yet. Each
+	 * one of these ends up in a cluster of its own.
+	 *
+	 * @return int[] IDs of the faces
+	 */
+	public function findUnassignedNonGroupableFaces(string $userId, int $model, int $minSize, float $minConfidence, int $limit): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('f.id')
+			->from($this->getTableName(), 'f')
+			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
+			->where($qb->expr()->eq('user', $qb->createParameter('user')))
+			->andWhere($qb->expr()->eq('model', $qb->createParameter('model')))
+			->andWhere($qb->expr()->isNull('f.cluster'))
+			->andWhere($qb->expr()->orX(
+				$qb->expr()->lt('width', $qb->createParameter('min_size')),
+				$qb->expr()->lt('height', $qb->createParameter('min_size')),
+				$qb->expr()->lt('confidence', $qb->createParameter('min_confidence')),
+				$qb->expr()->eq('is_groupable', $qb->createParameter('is_groupable'))
+			))
+			->setParameter('user', $userId)
+			->setParameter('model', $model)
+			->setParameter('min_size', $minSize)
+			->setParameter('min_confidence', $minConfidence)
+			->setParameter('is_groupable', false, IQueryBuilder::PARAM_BOOL)
+			->orderBy('f.id', 'ASC')
+			->setMaxResults($limit);
+
+		$result = $qb->executeQuery();
+		$ids = [];
+		while ($row = $result->fetch()) {
+			$ids[] = (int) $row['id'];
+		}
+		$result->closeCursor();
+
+		return $ids;
+	}
+
+	/**
+	 * A few faces of each existing cluster, and the size of every cluster.
+	 *
+	 * The samples are what lets an arriving face find the cluster it belongs
+	 * to without putting the whole cluster in the clustering: chinese whispers
+	 * only ever looks at the neighbours of a node, so one neighbour in the
+	 * sample is enough to join. The oldest faces of the cluster are taken,
+	 * which is deterministic and needs no extra state.
+	 *
+	 * Only the faces that could be grouped are sampled. A face that is too
+	 * small, too uncertain, or that the user detached, was put in a cluster
+	 * without ever being compared with anything, and it must not become the
+	 * reason for another face to join that cluster.
+	 *
+	 * Only ids are read, and only the samples are kept in memory, so this
+	 * costs one query and holds clusters * $samples entries.
+	 *
+	 * @return array [faceId => clusterId], [clusterId => size]
+	 */
+	public function findClusterSamples(string $userId, int $model, int $minSize, float $minConfidence, int $samples): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('f.id', 'f.cluster')
+			->from($this->getTableName(), 'f')
+			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
+			->where($qb->expr()->eq('user', $qb->createParameter('user')))
+			->andWhere($qb->expr()->eq('model', $qb->createParameter('model')))
+			->andWhere($qb->expr()->isNotNull('f.cluster'))
+			->andWhere($qb->expr()->gte('width', $qb->createParameter('min_size')))
+			->andWhere($qb->expr()->gte('height', $qb->createParameter('min_size')))
+			->andWhere($qb->expr()->gte('confidence', $qb->createParameter('min_confidence')))
+			->andWhere($qb->expr()->eq('is_groupable', $qb->createParameter('is_groupable')))
+			// A manually added face has no descriptor until the model finds one
+			// in the marked region, and there is nothing to compare it with
+			// until then.
+			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]')))
+			->setParameter('user', $userId)
+			->setParameter('model', $model)
+			->setParameter('min_size', $minSize)
+			->setParameter('min_confidence', $minConfidence)
+			->setParameter('is_groupable', true, IQueryBuilder::PARAM_BOOL)
+			->orderBy('f.cluster', 'ASC')
+			->addOrderBy('f.id', 'ASC');
+
+		$result = $qb->executeQuery();
+		$sampleOf = [];
+		$sizes = [];
+		while ($row = $result->fetch()) {
+			$cluster = (int) $row['cluster'];
+			$sizes[$cluster] = ($sizes[$cluster] ?? 0) + 1;
+			if ($sizes[$cluster] <= $samples) {
+				$sampleOf[(int) $row['id']] = $cluster;
+			}
+		}
+		$result->closeCursor();
+
+		return [$sampleOf, $sizes];
+	}
+
+	/**
+	 * Images each of the given clusters has faces in.
+	 *
+	 * Two faces of one image are two people, so two clusters that share an image
+	 * cannot be the same person. That is the one thing that can be said for sure
+	 * without looking at a descriptor.
+	 *
+	 * @param int[] $clusterIds
+	 *
+	 * @return array [clusterId => [imageId => true]]
+	 */
+	public function findClustersImages(array $clusterIds): array {
+		if (empty($clusterIds)) {
+			return [];
+		}
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->selectDistinct('cluster')
+			->addSelect('image')
+			->from($this->getTableName())
+			->where($qb->expr()->in('cluster', $qb->createParameter('cluster_ids')));
+
+		$images = [];
+		foreach (array_chunk($clusterIds, 1000) as $chunk) {
+			$qb->setParameter('cluster_ids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
+			$result = $qb->executeQuery();
+			while ($row = $result->fetch()) {
+				$images[(int) $row['cluster']][(int) $row['image']] = true;
+			}
+			$result->closeCursor();
+		}
+
+		return $images;
+	}
+
 	public function getNonGroupableFaces(string $userId, int $model, int $minSize, float $minConfidence): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'f.person')
+		$qb->select('f.id', 'f.cluster')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('user', $qb->createParameter('user')))
@@ -208,16 +379,11 @@ class FaceMapper extends QBMapper {
 				$qb->expr()->lt('confidence', $qb->createParameter('min_confidence')),
 				$qb->expr()->eq('is_groupable', $qb->createParameter('is_groupable'))
 			))
-			->andWhere($qb->expr()->orX(
-				$qb->expr()->isNull('is_manual'),
-				$qb->expr()->eq('is_manual', $qb->createParameter('is_manual'))
-			))
 			->setParameter('user', $userId)
 			->setParameter('model', $model)
 			->setParameter('min_size', $minSize)
 			->setParameter('min_confidence', $minConfidence)
-			->setParameter('is_groupable', false, IQueryBuilder::PARAM_BOOL)
-			->setParameter('is_manual', false, IQueryBuilder::PARAM_BOOL);
+			->setParameter('is_groupable', false, IQueryBuilder::PARAM_BOOL);
 
 		$result = $qb->executeQuery();
 		$rows = $result->fetchAll();
@@ -231,11 +397,11 @@ class FaceMapper extends QBMapper {
 	 */
 	public function findFromCluster(string $userId, int $clusterId, int $model, ?int $limit = null, $offset = null): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'f.image', 'f.person')
+		$qb->select('f.id', 'f.image', 'f.cluster')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
-			->andWhere($qb->expr()->eq('person', $qb->createNamedParameter($clusterId)))
+			->andWhere($qb->expr()->eq('cluster', $qb->createNamedParameter($clusterId)))
 			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($model)));
 
 		$qb->setMaxResults($limit);
@@ -253,10 +419,11 @@ class FaceMapper extends QBMapper {
 		$qb->select('f.id')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images' ,'i', $qb->expr()->eq('f.image', 'i.id'))
-			->innerJoin('f', 'facerecog_persons' ,'p', $qb->expr()->eq('f.person', 'p.id'))
+			->innerJoin('f', 'facerecog_clusters' ,'c', $qb->expr()->eq('f.cluster', 'c.id'))
+			->innerJoin('c', 'facerecog_persons' ,'p', $qb->expr()->eq('c.person', 'p.id'))
 			->where($qb->expr()->eq('p.user', $qb->createNamedParameter($userId)))
-			->andWhere($qb->expr()->eq('name', $qb->createNamedParameter($personId)))
-			->andWhere($qb->expr()->eq('model', $qb->createNamedParameter($model)))
+			->andWhere($qb->expr()->eq('p.name', $qb->createNamedParameter($personId)))
+			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($model)))
 			->orderBy('i.file', 'DESC');
 
 		$qb->setMaxResults($limit);
@@ -276,10 +443,59 @@ class FaceMapper extends QBMapper {
 	 */
 	public function findByImage(int $imageId): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'image', 'person')
+		$qb->select('id', 'image', 'cluster', 'x', 'y', 'width', 'height', 'is_groupable')
 			->from($this->getTableName())
 			->where($qb->expr()->eq('image', $qb->createNamedParameter($imageId)));
 		$faces = $this->findEntities($qb);
+		return $faces;
+	}
+
+	/**
+	 * Copies the faces of one image to another, so that the analysis of a file
+	 * can be reused for the same file of another user (a shared photo keeps its
+	 * file id in every account).
+	 *
+	 * The faces are not inserted: the caller passes them to imageProcessed(),
+	 * which replaces the faces of the image and can carry the clusters of the
+	 * old ones over the new ones, as it does with the faces the model finds.
+	 *
+	 * Only the geometry and the descriptor are copied. The cluster is left
+	 * unassigned and the face is made groupable again: the clusters, persons
+	 * and detached faces are decisions of the user that made them, and must not
+	 * leak to the user that reuses the analysis.
+	 *
+	 * @param int $fromImageId Image to copy the faces of
+	 * @param int $toImageId Image to copy the faces to
+	 *
+	 * @return Face[] The copied faces
+	 */
+	public function copyFaces(int $fromImageId, int $toImageId): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('x', 'y', 'width', 'height', 'confidence', 'landmarks', 'descriptor')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('image', $qb->createNamedParameter($fromImageId)));
+
+		$result = $qb->executeQuery();
+		$rows = $result->fetchAll();
+		$result->closeCursor();
+
+		$faces = [];
+		foreach ($rows as $row) {
+			$face = new Face();
+			$face->image       = $toImageId;
+			$face->cluster     = null;
+			$face->isGroupable = true;
+			$face->x           = (int)$row['x'];
+			$face->y           = (int)$row['y'];
+			$face->width       = (int)$row['width'];
+			$face->height      = (int)$row['height'];
+			$face->confidence  = (float)$row['confidence'];
+			$face->landmarks   = json_decode($row['landmarks'], true);
+			$face->descriptor  = json_decode($row['descriptor'], true);
+			$face->setCreationTime(new \DateTime());
+			$faces[] = $face;
+		}
+
 		return $faces;
 	}
 
@@ -344,13 +560,13 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
-	 * Unset relation beetwen faces and persons from that user in order to reset clustering
+	 * Unset the relation between the faces and their clusters, to cluster again
 	 *
-	 * @param string $userId User to drop fo unset relation.
+	 * @param string $userId User to unset the relation for.
 	 *
 	 * @return void
 	 */
-	public function unsetPersonsRelationForUser(string $userId, int $model): void {
+	public function unsetClustersRelationForUser(string $userId, int $model): void {
 		$sub = $this->db->getQueryBuilder();
 		$sub->select(new Literal('1'));
 		$sub->from('facerecog_images', 'i')
@@ -360,7 +576,7 @@ class FaceMapper extends QBMapper {
 
 		$qb = $this->db->getQueryBuilder();
 		$qb->update($this->getTableName())
-			->set("person", $qb->createNamedParameter(null))
+			->set("cluster", $qb->createNamedParameter(null))
 			->where('EXISTS (' . $sub->getSQL() . ')')
 			->setParameter('model', $model)
 			->setParameter('user', $userId)
@@ -377,7 +593,7 @@ class FaceMapper extends QBMapper {
 	 *
 	 * @return Face
 	 */
-	public function insertFace(Face $face, IDBConnection $db = null): Face {
+	public function insertFace(Face $face, ?IDBConnection $db = null): Face {
 		if ($db !== null) {
 			$qb = $db->getQueryBuilder();
 		} else {
@@ -387,7 +603,8 @@ class FaceMapper extends QBMapper {
 		$qb->insert($this->getTableName())
 			->values([
 				'image' => $qb->createNamedParameter($face->image),
-				'person' => $qb->createNamedParameter($face->person),
+				'cluster' => $qb->createNamedParameter($face->cluster),
+				'is_groupable' => $qb->createNamedParameter($face->isGroupable, IQueryBuilder::PARAM_BOOL),
 				'x' => $qb->createNamedParameter($face->x),
 				'y' => $qb->createNamedParameter($face->y),
 				'width' => $qb->createNamedParameter($face->width),
@@ -405,23 +622,28 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
-	 * Reassign a single face to a different person cluster and mark it manual
-	 * so the background clustering job leaves it in place on the next run.
+	 * Marks a face as one the user put there by hand, which is what keeps the
+	 * analysis from replacing it: `imageProcessed()` deletes the faces the
+	 * model found last time, and a manual face is not something it can find
+	 * again.
 	 */
-	public function reassignFace(int $faceId, int $personId): void {
+	public function markFaceManual(int $faceId): void {
 		$qb = $this->db->getQueryBuilder();
 		$qb->update($this->getTableName())
-			->set('person', $qb->createNamedParameter($personId))
 			->set('is_manual', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($faceId)))
 			->executeStatement();
 	}
 
 	/**
-	 * Insert a manually added face. No descriptor/landmarks (user-drawn, no model data).
-	 * is_manual=true pins the face to its assigned person so the clustering job does not
-	 * reassign it. If $face->isGroupable is true the face participates in clustering
-	 * (descriptor extraction must happen before it is useful there).
+	 * Inserts a face the user drew on a photo. It carries no landmarks and no
+	 * descriptor, because no model was involved in finding it, and it is left
+	 * without a cluster: the caller puts it in the one of the person the user
+	 * named.
+	 *
+	 * When $face->isGroupable is true the user asked for the face to take part
+	 * in the clustering, and ManualFaceDescriptorTask has to find a descriptor
+	 * for it before it is of any use there.
 	 */
 	public function insertManualFace(Face $face): Face {
 		$qb = $this->db->getQueryBuilder();
@@ -429,7 +651,7 @@ class FaceMapper extends QBMapper {
 		$qb->insert($this->getTableName())
 			->values([
 				'image' => $qb->createNamedParameter($face->image),
-				'person' => $qb->createNamedParameter($face->person),
+				'cluster' => $qb->createNamedParameter($face->cluster),
 				'x' => $qb->createNamedParameter($face->x),
 				'y' => $qb->createNamedParameter($face->y),
 				'width' => $qb->createNamedParameter($face->width),
@@ -450,8 +672,8 @@ class FaceMapper extends QBMapper {
 
 	/**
 	 * Manual faces the user flagged for clustering (is_groupable = true) that
-	 * still have no descriptor (the model has not confirmed a face there yet).
-	 * These are picked up by the background descriptor-extraction task.
+	 * still have no descriptor, because the model has not confirmed a face in
+	 * the marked region yet. These are what ManualFaceDescriptorTask works on.
 	 *
 	 * @return array<int, array<string, mixed>> rows with id, file, x, y, width, height
 	 */
@@ -474,37 +696,15 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
-	 * Manual faces the user pinned to a person (is_manual = true and a person
-	 * assigned). The clustering job uses these to anchor the faces so the merge
-	 * never reassigns them to a different person or drops their user-set name.
-	 * Faces that take no part in clustering are harmless here: their ids simply
-	 * never appear in any cluster, so anchoring them has no effect.
+	 * Stores the descriptor found for a manual face, together with the box it
+	 * was actually computed from. The box replaces the rectangle the user drew,
+	 * so that what the frontend shows and what the clustering compares are the
+	 * same face: the detection can land on a face sitting in the margin of the
+	 * marked region, and then the two would describe different people.
 	 *
-	 * @return array<int, array<string, mixed>> rows with id, person
-	 */
-	public function findManualFacesWithPerson(string $userId, int $modelId): array {
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'f.person')
-			->from($this->getTableName(), 'f')
-			->innerJoin('f', 'facerecog_images', 'i', $qb->expr()->eq('f.image', 'i.id'))
-			->where($qb->expr()->eq('i.user', $qb->createNamedParameter($userId)))
-			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($modelId)))
-			->andWhere($qb->expr()->eq('f.is_manual', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)))
-			->andWhere($qb->expr()->isNotNull('f.person'));
-
-		$result = $qb->executeQuery();
-		$rows = $result->fetchAll();
-		$result->closeCursor();
-
-		return $rows;
-	}
-
-	/**
-	 * Store the descriptor computed for a manual face, together with the bounding
-	 * box the descriptor was actually computed from. The box replaces the user's
-	 * rectangle so the frontend shows the face the descriptor belongs to instead
-	 * of the (possibly off) marked region. The face stays groupable so the
-	 * clustering job will treat it like any other detected face.
+	 * The face stays groupable, so from here on the clustering treats it like
+	 * any other face: it becomes a sample of its cluster and can draw faces
+	 * that look alike into the person the user named.
 	 */
 	public function setManualFaceDescriptor(int $faceId, array $descriptor, int $x, int $y, int $width, int $height): void {
 		$qb = $this->db->getQueryBuilder();
@@ -519,9 +719,10 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
-	 * Give up on using a manual face for clustering (no face could be detected
-	 * in the marked region). The face stays pinned to its person but is excluded
-	 * from clustering, and it is no longer picked up as pending.
+	 * Gives up on using a manual face for the clustering, because no face could
+	 * be found in the marked region. It keeps the cluster, and therefore the
+	 * person, the user gave it; it is only left out of the comparisons, and it
+	 * is not picked up as pending again.
 	 */
 	public function markManualFaceNotGroupable(int $faceId): void {
 		$qb = $this->db->getQueryBuilder();

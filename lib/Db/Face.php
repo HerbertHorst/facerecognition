@@ -31,7 +31,7 @@ use OCP\AppFramework\Db\Entity;
  * Face represents one found face from one image.
  *
  * @method int getImage()
- * @method int getPerson()
+ * @method int getCluster()
  * @method int getX()
  * @method int getY()
  * @method int getWidth()
@@ -39,12 +39,13 @@ use OCP\AppFramework\Db\Entity;
  * @method float getConfidence()
  * @method bool getIsManual()
  * @method void setImage(int $image)
- * @method void setPerson(int $person)
+ * @method void setCluster(int $cluster)
  * @method void setX(int $x)
  * @method void setY(int $y)
  * @method void setWidth(int $width)
  * @method void setHeight(int $height)
  * @method void setConfidence(float $confidence)
+ * @method void setIsManual(bool $isManual)
  */
 class Face extends Entity implements JsonSerializable {
 
@@ -56,11 +57,12 @@ class Face extends Entity implements JsonSerializable {
 	public $image;
 
 	/**
-	 * Person (cluster) that this face belongs to
+	 * Cluster of faces that look alike this one belongs to. Who that cluster
+	 * is, if the user already said, is the person of the cluster.
 	 *
 	 * @var int|null
 	 * */
-	public $person;
+	public $cluster;
 
 	/**
 	 * Left border of bounding rectangle for this face
@@ -135,9 +137,9 @@ class Face extends Entity implements JsonSerializable {
 	public function __construct() {
 		$this->addType('id', 'integer');
 		$this->addType('image', 'integer');
-		$this->addType('person', 'integer');
-		$this->addType('isGroupable', 'bool');
-		$this->addType('isManual', 'bool');
+		$this->addType('cluster', 'integer');
+		$this->addType('isGroupable', 'boolean');
+		$this->addType('isManual', 'boolean');
 		$this->addType('descriptor', 'json');
 		$this->addType('creationTime', 'datetime');
 	}
@@ -151,15 +153,17 @@ class Face extends Entity implements JsonSerializable {
 	 */
 	public static function fromModel(int $imageId, array $faceFromModel): Face {
 		$face = new Face();
-		$face->image      = $imageId;
-		$face->person     = null;
-		$face->x          = $faceFromModel['left'];
-		$face->y          = $faceFromModel['top'];
-		$face->width      = $faceFromModel['right'] - $faceFromModel['left'];
-		$face->height     = $faceFromModel['bottom'] - $faceFromModel['top'];
-		$face->confidence = $faceFromModel['detection_confidence'];
-		$face->landmarks  = isset($faceFromModel['landmarks']) ? $faceFromModel['landmarks'] : [];
-		$face->descriptor = isset($faceFromModel['descriptor']) ? $faceFromModel['descriptor'] : [];
+		$face->image       = $imageId;
+		$face->cluster     = null;
+		$face->isGroupable = true;
+		$face->isManual    = false;
+		$face->x           = $faceFromModel['left'];
+		$face->y           = $faceFromModel['top'];
+		$face->width       = $faceFromModel['right'] - $faceFromModel['left'];
+		$face->height      = $faceFromModel['bottom'] - $faceFromModel['top'];
+		$face->confidence  = $faceFromModel['detection_confidence'];
+		$face->landmarks   = isset($faceFromModel['landmarks']) ? $faceFromModel['landmarks'] : [];
+		$face->descriptor  = isset($faceFromModel['descriptor']) ? $faceFromModel['descriptor'] : [];
 		$face->setCreationTime(new \DateTime());
 		return $face;
 	}
@@ -168,7 +172,7 @@ class Face extends Entity implements JsonSerializable {
 		return [
 			'id' => $this->id,
 			'image' => $this->image,
-			'person' => $this->person,
+			'cluster' => $this->cluster,
 			'x' => $this->x,
 			'y' => $this->y,
 			'width' => $this->width,

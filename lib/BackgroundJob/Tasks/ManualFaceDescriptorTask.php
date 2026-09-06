@@ -20,7 +20,6 @@
  */
 namespace OCA\FaceRecognition\BackgroundJob\Tasks;
 
-use OCP\Image as OCP_Image;
 use OCP\ITempManager;
 use OCP\Files\File;
 
@@ -29,6 +28,7 @@ use OCA\FaceRecognition\BackgroundJob\FaceRecognitionContext;
 
 use OCA\FaceRecognition\Db\FaceMapper;
 
+use OCA\FaceRecognition\Helper\ImageUtil;
 use OCA\FaceRecognition\Helper\TempImage;
 
 use OCA\FaceRecognition\Model\IModel;
@@ -234,12 +234,12 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 	 *         temp file and its top-left offset, or null on failure
 	 */
 	private function cropRegion(string $localPath, string $mimeType, int $x, int $y, int $w, int $h): ?array {
-		$image = new OCP_Image();
-		if ($image->loadFromFile($localPath) === false) {
-			return null;
-		}
-		$image->fixOrientation();
-		if (!$image->valid()) {
+		// The same loader the analysis uses, so that a face marked on a HEIC or
+		// an AVIF is cropped from the same image the model saw. No maximum area
+		// is imposed here: the rectangle is in pixels of the original image, and
+		// a downscale would put the crop somewhere else.
+		$image = ImageUtil::loadFromPath($localPath, true, null);
+		if (is_null($image)) {
 			return null;
 		}
 

@@ -26,6 +26,9 @@ namespace OCA\FaceRecognition\Service;
 
 use OCA\FaceRecognition\AppInfo\Application;
 
+use OCA\FaceRecognition\Helper\Imaginary;
+use OCA\FaceRecognition\Helper\Requirements;
+
 use OCA\FaceRecognition\Model\ModelManager;
 
 use OCP\IConfig;
@@ -61,6 +64,20 @@ class SettingsService {
 	const DEFAULT_ANALYSIS_IMAGE_AREA = -1; // It is dynamically configured according to hardware
 	const MAXIMUM_ANALYSIS_IMAGE_AREA = 3840*2160;
 
+	/**
+	 * Image area used by the fast, first pass of the analysis. Its minimum is
+	 * lower than the one of the analysis area: the point of the fast pass is to
+	 * go over the library quickly, and the faces it misses on a small image are
+	 * found by the refinement anyway.
+	 */
+	const FAST_PASS_IMAGE_AREA_KEY = 'fast_pass_image_area';
+	const MINIMUM_FAST_PASS_IMAGE_AREA = 320*240;
+	const DEFAULT_FAST_PASS_IMAGE_AREA = 640*480;
+
+	/** Whether the refinement pass, that re-analyzes the images at maximum quality, is enabled */
+	const REFINEMENT_ENABLED_KEY = 'refinement_enabled';
+	const DEFAULT_REFINEMENT_ENABLED = 'true';
+
 	/** Sensitivity used to clustering */
 	const SENSITIVITY_KEY = 'sensitivity';
 	const MINIMUM_SENSITIVITY = '0.2';
@@ -89,8 +106,37 @@ class SettingsService {
 	const USER_ENABLED_KEY = 'enabled';
 	// The default is defined by system 'default_enabled' key
 
-	const CLUSTERING_BATCH_SIZE_KEY = 'clustering_batch_size';
-	const DEFAULT_CLUSTERING_BATCH_SIZE = '-1';
+	/**
+	 * How many faces without a cluster are clustered on each run, and how many
+	 * faces of each existing cluster are put in with them. Together they bound
+	 * the input of the clustering, and therefore its time and its memory: the
+	 * input is FACES_PER_RUN + clusters * SAMPLES_PER_CLUSTER faces, and the
+	 * cost grows with the square of that.
+	 *
+	 * A bigger batch also gets closer to what clustering everything at once
+	 * would have given, so it should be as big as the memory allows.
+	 */
+	const CLUSTERING_FACES_PER_RUN_KEY = 'clustering_faces_per_run';
+	const DEFAULT_CLUSTERING_FACES_PER_RUN = '5000';
+	const MINIMUM_CLUSTERING_FACES_PER_RUN = '100';
+
+	const CLUSTERING_SAMPLES_PER_CLUSTER_KEY = 'clustering_samples_per_cluster';
+	const DEFAULT_CLUSTERING_SAMPLES_PER_CLUSTER = '10';
+	const MINIMUM_CLUSTERING_SAMPLES_PER_CLUSTER = '1';
+
+	/**
+	 * Distance up to which two clusters are proposed to the user as being the
+	 * same person. It is looser than the sensitivity on purpose: the whole point
+	 * is to propose what the clustering was too careful to join by itself, which
+	 * is what happens with another age, another pose or a shaved beard. The
+	 * clusters are not joined, they are only proposed.
+	 */
+	const LINK_SUGGESTION_SENSITIVITY_KEY = 'link_suggestion_sensitivity';
+	const DEFAULT_LINK_SUGGESTION_SENSITIVITY = '0.55';
+
+	/** How many faces of each cluster are compared to look for those. */
+	const LINK_SUGGESTION_SAMPLES_KEY = 'link_suggestion_samples';
+	const DEFAULT_LINK_SUGGESTION_SAMPLES = '3';
 
 	/** User setting that remember last images checked */
 	const STALE_IMAGES_LAST_CHECKED_KEY = 'stale_images_last_checked';
@@ -139,8 +185,55 @@ class SettingsService {
 	/** System setting to enable mimetypes */
 
 	const SYSTEM_ENABLED_MIMETYPES = 'enabledFaceRecognitionMimetype';
-	private $allowedMimetypes = ['image/jpeg', 'image/png'];
+
+	/**
+	 * Mimetypes that every image backend decodes: GD, Imagick and Imaginary all
+	 * read them, so the analysis is always enabled for them.
+	 */
+	const BASE_MIMETYPES = [
+		'image/jpeg',
+		'image/png',
+	];
+
+	/**
+	 * Mimetypes of the formats that only some backends decode, grouped by the
+	 * name of the format the backend has to support. A group is only enabled
+	 * when the active backend reports it, so a file is never indexed just to
+	 * fail later, when it is decoded.
+	 *
+	 * Only the formats that a camera or a phone writes are listed. GIF, BMP and
+	 * WEBP are left out on purpose, even though the local backends read them:
+	 * they are the formats of memes, stickers and screenshots, that would fill
+	 * the analysis with drawings and video captures, and every face found on
+	 * one of those is a cluster the user has to reject by hand. An
+	 * administrator that does keep photographs in them can still enable each
+	 * mimetype through the 'enabledFaceRecognitionMimetype' system setting.
+	 */
+	const EXTENDED_MIMETYPES = [
+		'HEIC' => ['image/heic', 'image/heif', 'image/heic-sequence', 'image/heif-sequence'],
+		'TIFF' => ['image/tiff', 'image/x-tiff'],
+		'AVIF' => ['image/avif'],
+	];
+
+	/**
+	 * Extended formats that Imaginary decodes. It is built on libvips, that
+	 * reads every one of them.
+	 */
+	const IMAGINARY_FORMATS = ['HEIC', 'TIFF', 'AVIF'];
+
+	/**
+	 * Names Imagick may report for each extended format. It lists TIFF as both
+	 * TIFF and TIF, and the HEIC delegate is sometimes reported only as HEIF,
+	 * so any of the aliases enables the group.
+	 */
+	const IMAGICK_FORMATS = [
+		'HEIC' => ['HEIC', 'HEIF'],
+		'TIFF' => ['TIFF', 'TIF'],
+		'AVIF' => ['AVIF'],
+	];
+
 	private $cachedAllowedMimetypes = false;
+	private $allowedMimetypes = [];
 
 	/** System setting to use custom folder for models */
 	const SYSTEM_MODEL_PATH = 'facerecognition.model_path';
@@ -274,6 +367,33 @@ class SettingsService {
 		return intval($this->config->getAppValue(Application::APP_NAME, self::ANALYSIS_IMAGE_AREA_KEY, strval(self::DEFAULT_ANALYSIS_IMAGE_AREA)));
 	}
 
+	/**
+	 * Image area the fast pass works on. It is only reachable through
+	 * `occ config:app:set`, which does not validate, so the value is clamped.
+	 * The floor is lower than the one of the analysis area, so that the fast
+	 * pass can be asked for something smaller than what a final analysis would
+	 * accept, which is the whole point of it.
+	 */
+	public function getFastPassImageArea(): int {
+		$area = intval($this->config->getAppValue(Application::APP_NAME, self::FAST_PASS_IMAGE_AREA_KEY, strval(self::DEFAULT_FAST_PASS_IMAGE_AREA)));
+		$area = max($area, self::MINIMUM_FAST_PASS_IMAGE_AREA);
+		$area = min($area, self::MAXIMUM_ANALYSIS_IMAGE_AREA);
+		return $area;
+	}
+
+	public function setFastPassImageArea(int $imageArea): void {
+		$this->config->setAppValue(Application::APP_NAME, self::FAST_PASS_IMAGE_AREA_KEY, strval($imageArea));
+	}
+
+	public function getRefinementEnabled(): bool {
+		$enabled = $this->config->getAppValue(Application::APP_NAME, self::REFINEMENT_ENABLED_KEY, self::DEFAULT_REFINEMENT_ENABLED);
+		return ($enabled === 'true');
+	}
+
+	public function setRefinementEnabled(bool $enabled): void {
+		$this->config->setAppValue(Application::APP_NAME, self::REFINEMENT_ENABLED_KEY, $enabled ? 'true' : 'false');
+	}
+
 	public function setAssignedMemory(int $assignedMemory): void {
 		$this->config->setAppValue(Application::APP_NAME, self::ASSIGNED_MEMORY_KEY, strval($assignedMemory));
 	}
@@ -315,10 +435,44 @@ class SettingsService {
 		return ($enabled === 'true');
 	}
 
-	public function getClusterigBatchSize(): int {
-		if ($this->config->getSystemValue('dbtype', 'sqlite') === 'oci')
-			return 1000;
-		return intval($this->config->getAppValue(Application::APP_NAME, self::CLUSTERING_BATCH_SIZE_KEY, self::DEFAULT_CLUSTERING_BATCH_SIZE));
+	/**
+	 * Faces without a cluster that are taken on each run of the clustering.
+	 */
+	public function getClusteringFacesPerRun(): int {
+		$faces = intval($this->config->getAppValue(Application::APP_NAME,
+		                                           self::CLUSTERING_FACES_PER_RUN_KEY,
+		                                           self::DEFAULT_CLUSTERING_FACES_PER_RUN));
+		return max($faces, intval(self::MINIMUM_CLUSTERING_FACES_PER_RUN));
+	}
+
+	/**
+	 * Faces of each existing cluster that are clustered together with them, so
+	 * that the arriving faces can find the cluster they belong to. A cluster
+	 * contributes these many faces whether it has ten or fifty thousand.
+	 */
+	public function getClusteringSamplesPerCluster(): int {
+		$samples = intval($this->config->getAppValue(Application::APP_NAME,
+		                                             self::CLUSTERING_SAMPLES_PER_CLUSTER_KEY,
+		                                             self::DEFAULT_CLUSTERING_SAMPLES_PER_CLUSTER));
+		return max($samples, intval(self::MINIMUM_CLUSTERING_SAMPLES_PER_CLUSTER));
+	}
+
+	/**
+	 * Distance up to which two clusters are proposed as being one person.
+	 */
+	public function getLinkSuggestionSensitivity(): float {
+		return floatval($this->config->getAppValue(Application::APP_NAME,
+		                                           self::LINK_SUGGESTION_SENSITIVITY_KEY,
+		                                           self::DEFAULT_LINK_SUGGESTION_SENSITIVITY));
+	}
+
+	/**
+	 * Faces of each cluster compared when looking for those.
+	 */
+	public function getLinkSuggestionSamples(): int {
+		return max(1, intval($this->config->getAppValue(Application::APP_NAME,
+		                                                self::LINK_SUGGESTION_SAMPLES_KEY,
+		                                                self::DEFAULT_LINK_SUGGESTION_SAMPLES)));
 	}
 
 	public function getHandleSharedFiles(): bool {
@@ -368,15 +522,74 @@ class SettingsService {
 	 * System settings that must be configured according to the server configuration.
 	 */
 	public function isAllowedMimetype(string $mimetype): bool {
-		if (!$this->cachedAllowedMimetypes) {
-			$systemMimetypes = $this->config->getSystemValue(self::SYSTEM_ENABLED_MIMETYPES, $this->allowedMimetypes);
-			$this->allowedMimetypes = array_merge($this->allowedMimetypes, $systemMimetypes);
-			$this->allowedMimetypes = array_unique($this->allowedMimetypes);
+		return in_array($mimetype, $this->getAllowedMimetypes());
+	}
 
+	/**
+	 * Mimetypes that the analysis is enabled for: the base ones that every
+	 * image backend can decode, the extended ones that the active backend can
+	 * actually decode, and any additional one forced by the administrator
+	 * through the 'enabledFaceRecognitionMimetype' system setting.
+	 *
+	 * @return string[] list of allowed mimetypes
+	 */
+	public function getAllowedMimetypes(): array {
+		if (!$this->cachedAllowedMimetypes) {
+			$mimetypes = self::BASE_MIMETYPES;
+
+			foreach ($this->getBackendSupportedFormats() as $format) {
+				$mimetypes = array_merge($mimetypes, self::EXTENDED_MIMETYPES[$format] ?? []);
+			}
+
+			// An explicit administrator configuration is always honored, even
+			// if it names a format that this app cannot decode by itself.
+			$systemMimetypes = $this->config->getSystemValue(self::SYSTEM_ENABLED_MIMETYPES, []);
+			if (is_array($systemMimetypes)) {
+				$mimetypes = array_merge($mimetypes, $systemMimetypes);
+			}
+
+			$this->allowedMimetypes = array_values(array_unique($mimetypes));
 			$this->cachedAllowedMimetypes = true;
 		}
 
-		return in_array($mimetype, $this->allowedMimetypes);
+		return $this->allowedMimetypes;
+	}
+
+	/**
+	 * Names of the extended formats that the active image backend can decode.
+	 *
+	 * With Imaginary it is whatever that service reads. Without it the images
+	 * are decoded locally, and none of these formats ever reaches GD: Nextcloud
+	 * OCP\Image does not route any of them to it, not even AVIF, that GD may be
+	 * able to read on its own. So locally they all depend on the Imagick
+	 * extension being built with the proper delegates.
+	 *
+	 * @return string[] names of the supported formats
+	 */
+	protected function getBackendSupportedFormats(): array {
+		if ($this->isImaginaryEnabled()) {
+			return self::IMAGINARY_FORMATS;
+		}
+
+		$formats = [];
+		$imagick = array_flip(array_map('strtoupper', Requirements::imagickSupportedFormats()));
+
+		foreach (self::IMAGICK_FORMATS as $format => $names) {
+			if (count(array_intersect_key($imagick, array_flip($names))) > 0) {
+				$formats[] = $format;
+			}
+		}
+
+		return $formats;
+	}
+
+	/**
+	 * Whether the server is configured to use Imaginary to process the images.
+	 * Imaginary is the only way to decode formats like HEIC or TIFF without an
+	 * Imagick build with the proper delegates.
+	 */
+	protected function isImaginaryEnabled(): bool {
+		return $this->config->getSystemValueString(Imaginary::SYSTEM_URL, 'invalid') !== 'invalid';
 	}
 
 	/**
