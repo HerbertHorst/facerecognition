@@ -216,7 +216,7 @@ class FaceMapper extends QBMapper {
 			// A manually added face has no descriptor until the model finds one
 			// in the marked region, and there is nothing to compare it with
 			// until then.
-			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]')))
+			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]'), IQueryBuilder::PARAM_JSON))
 			->setParameter('user', $userId)
 			->setParameter('model', $model)
 			->setParameter('min_size', $minSize)
@@ -307,7 +307,7 @@ class FaceMapper extends QBMapper {
 			// A manually added face has no descriptor until the model finds one
 			// in the marked region, and there is nothing to compare it with
 			// until then.
-			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]')))
+			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]'), IQueryBuilder::PARAM_JSON))
 			->setParameter('user', $userId)
 			->setParameter('model', $model)
 			->setParameter('min_size', $minSize)
@@ -686,7 +686,7 @@ class FaceMapper extends QBMapper {
 			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($modelId)))
 			->andWhere($qb->expr()->eq('f.is_manual', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)))
 			->andWhere($qb->expr()->eq('f.is_groupable', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)))
-			->andWhere($qb->expr()->eq('f.descriptor', $qb->createNamedParameter('[]')));
+			->andWhere($qb->expr()->eq('f.descriptor', $qb->createNamedParameter('[]'), IQueryBuilder::PARAM_JSON));
 
 		$result = $qb->executeQuery();
 		$rows = $result->fetchAll();
