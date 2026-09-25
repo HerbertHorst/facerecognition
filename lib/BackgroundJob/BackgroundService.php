@@ -42,6 +42,8 @@ use OCA\FaceRecognition\BackgroundJob\Tasks\ManualFaceDescriptorTask;
 use OCA\FaceRecognition\BackgroundJob\Tasks\ManualRegionTask;
 use OCA\FaceRecognition\BackgroundJob\Tasks\StaleImagesRemovalTask;
 
+use Psr\Log\LoggerInterface;
+
 use Symfony\Component\Console\Output\OutputInterface;
 
 /**
@@ -88,7 +90,10 @@ class BackgroundService {
 			throw new \LogicException('You cannot call setLogger after you set it once');
 		}
 
-		$this->context->logger = new FaceRecognitionLogger($logger);
+		// The warnings also go to the Nextcloud log: the console of a run from
+		// the system cron is usually thrown away.
+		$this->context->logger = new FaceRecognitionLogger($logger,
+			$this->application->getContainer()->get(LoggerInterface::class));
 	}
 
 	/**

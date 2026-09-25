@@ -234,7 +234,7 @@ class ImageProcessingManualFacesTest extends ManualFaceTaskTestCase {
 
 		$this->assertCount(1, $this->processed['faces']);
 		$this->assertTrue($this->processed['refined']);
-		$this->assertLogged('[manual faces] Image 10');
+		$this->assertWarned('[manual faces] Image 10');
 	}
 
 	/**
@@ -257,7 +257,7 @@ class ImageProcessingManualFacesTest extends ManualFaceTaskTestCase {
 		// in its place.
 		$this->assertCount(1, $this->processed['faces']);
 		$this->assertEquals(7, $this->processed['faces'][0]->getCluster());
-		$this->assertLogged('deadlock');
+		$this->assertWarned('deadlock');
 	}
 
 	/**

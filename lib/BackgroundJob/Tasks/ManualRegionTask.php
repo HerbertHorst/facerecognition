@@ -115,7 +115,7 @@ class ManualRegionTask extends FaceRecognitionBackgroundTask {
 		try {
 			yield from $this->searchPendingRegions();
 		} catch (\Throwable $e) {
-			$this->log('The regions marked by hand could not be searched, they are left for the next run: ' . $e->getMessage());
+			$this->warn('The regions marked by hand could not be searched, they are left for the next run: ' . $e->getMessage());
 			$this->logDebug((string) $e);
 		}
 
@@ -124,7 +124,7 @@ class ManualRegionTask extends FaceRecognitionBackgroundTask {
 
 	private function searchPendingRegions(): \Generator {
 		if (!$this->regionMapper->isAvailable() || !$this->faceMapper->hasManualStateColumn()) {
-			$this->log('Skipping the regions marked by hand: the database migration of the app did not run yet');
+			$this->warn('Skipping the regions marked by hand: the database migration of the app did not run yet');
 			return;
 		}
 
@@ -229,7 +229,7 @@ class ManualRegionTask extends FaceRecognitionBackgroundTask {
 			$this->regionMapper->markDone($regionId, $found, $tooSmall, $lowConfidence);
 			$this->log('Region ' . $regionId . ': ' . $found . ' new face(s), of them ' . $tooSmall . ' too small and ' . $lowConfidence . ' below the minimum confidence');
 		} catch (\Throwable $e) {
-			$this->log('Region ' . $regionId . ' on file ' . $row['file'] . ' of user ' . $userId . ': could not be searched (' . $e->getMessage() . ')');
+			$this->warn('Region ' . $regionId . ' on file ' . $row['file'] . ' of user ' . $userId . ': could not be searched (' . $e->getMessage() . ')');
 			$this->logDebug((string) $e);
 			$this->giveUp($regionId, $e->getMessage());
 		} finally {
@@ -237,7 +237,7 @@ class ManualRegionTask extends FaceRecognitionBackgroundTask {
 			try {
 				$this->detector->clean();
 			} catch (\Throwable $e) {
-				$this->log('Region ' . $regionId . ': could not remove the temporary files (' . $e->getMessage() . ')');
+				$this->warn('Region ' . $regionId . ': could not remove the temporary files (' . $e->getMessage() . ')');
 			}
 		}
 	}
@@ -267,12 +267,20 @@ class ManualRegionTask extends FaceRecognitionBackgroundTask {
 		try {
 			$this->regionMapper->markFailed($regionId, $reason);
 		} catch (\Throwable $e) {
-			$this->log('Region ' . $regionId . ': could not record that it failed either (' . $e->getMessage() . '), it is left for the next run');
+			$this->warn('Region ' . $regionId . ': could not record that it failed either (' . $e->getMessage() . '), it is left for the next run');
 			$this->logDebug((string) $e);
 		}
 	}
 
 	private function log(string $message): void {
 		$this->logInfo(ManualFaceDetector::LOG_PREFIX . $message);
+	}
+
+	/**
+	 * What went wrong, as a warning: in the Nextcloud log at its default level
+	 * when the job runs from cron, where the info lines are not.
+	 */
+	private function warn(string $message): void {
+		$this->logWarning(ManualFaceDetector::LOG_PREFIX . $message);
 	}
 }

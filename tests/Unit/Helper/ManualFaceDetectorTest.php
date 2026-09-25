@@ -90,6 +90,41 @@ class ManualFaceDetectorTest extends TestCase {
 	}
 
 	/**
+	 * A file that is there and readable has no reason not to be read.
+	 */
+	public function testAReadablePhotoHasNoReasonToFail() {
+		$this->assertNull(ManualFaceDetector::unreadableReason(__DIR__ . '/../../assets/lenna.jpg'));
+	}
+
+	/**
+	 * A file missing on the storage is named as missing, and not only as a
+	 * photo that cannot be loaded.
+	 */
+	public function testAMissingFileIsNamedAsMissing() {
+		$reason = ManualFaceDetector::unreadableReason(sys_get_temp_dir() . '/facerecognition-missing-' . uniqid() . '.jpg');
+		$this->assertEquals('the file of the photo is missing on the storage', $reason);
+	}
+
+	/**
+	 * A file without read permission is named as such. As root every file is
+	 * readable, so this only runs as another user, like the web server.
+	 */
+	public function testAFileWithoutReadPermissionIsNamedAsNotReadable() {
+		if (function_exists('posix_getuid') && posix_getuid() === 0) {
+			$this->markTestSkipped('root can read any file; checked on the test instance as www-data instead');
+		}
+		$path = tempnam(sys_get_temp_dir(), 'facerecognition');
+		chmod($path, 0000);
+		try {
+			$this->assertEquals('the file of the photo is not readable for the web server, check its permissions',
+				ManualFaceDetector::unreadableReason($path));
+		} finally {
+			chmod($path, 0600);
+			unlink($path);
+		}
+	}
+
+	/**
 	 * The margin is cut at the edges of the photo.
 	 */
 	public function testCropIsKeptInsideThePhoto() {

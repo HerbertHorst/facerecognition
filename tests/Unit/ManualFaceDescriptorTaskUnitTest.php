@@ -191,7 +191,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 			->with(8, $this->anything(), 40, 40, 50, 50, 1.0, false);
 
 		$this->assertTrue($this->runTask($this->task()));
-		$this->assertLogged('[manual faces] Manual face 7 on file 404');
+		$this->assertWarned('[manual faces] Manual face 7 on file 404');
 	}
 
 	/**
@@ -227,7 +227,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->method('findManualFacesPendingDescriptor')->willThrowException(new \Error('no such table'));
 
 		$this->assertTrue($this->runTask($this->task()));
-		$this->assertLogged('[manual faces] The faces marked by hand could not be searched');
+		$this->assertWarned('[manual faces] The faces marked by hand could not be searched');
 	}
 
 	/**
@@ -257,7 +257,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->model->expects($this->never())->method('open');
 
 		$this->assertTrue($this->runTask($this->task()));
-		$this->assertLogged('migration');
+		$this->assertWarned('migration');
 	}
 
 	/**

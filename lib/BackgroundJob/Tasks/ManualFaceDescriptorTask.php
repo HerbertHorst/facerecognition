@@ -107,7 +107,7 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 		try {
 			yield from $this->searchPendingMarkings();
 		} catch (\Throwable $e) {
-			$this->log('The faces marked by hand could not be searched, they are left for the next run: ' . $e->getMessage());
+			$this->warn('The faces marked by hand could not be searched, they are left for the next run: ' . $e->getMessage());
 			$this->logDebug((string) $e);
 		}
 
@@ -116,7 +116,7 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 
 	private function searchPendingMarkings(): \Generator {
 		if (!$this->faceMapper->hasManualStateColumn()) {
-			$this->log('Skipping the faces marked by hand: the database migration of the app did not run yet');
+			$this->warn('Skipping the faces marked by hand: the database migration of the app did not run yet');
 			return;
 		}
 
@@ -205,7 +205,7 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 			$this->log('Manual face ' . $faceId . ': descriptor computed with a confidence of ' . $best['confidence']);
 		} catch (\Throwable $e) {
 			// Robustness: a single unreadable/odd region must never crash the job.
-			$this->log('Manual face ' . $faceId . ' on file ' . $row['file'] . ' of user ' . $userId . ': could not compute a descriptor (' . $e->getMessage() . '), excluding it from clustering');
+			$this->warn('Manual face ' . $faceId . ' on file ' . $row['file'] . ' of user ' . $userId . ': could not compute a descriptor (' . $e->getMessage() . '), excluding it from clustering');
 			$this->logDebug((string) $e);
 			$this->giveUp($faceId);
 		} finally {
@@ -213,7 +213,7 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 			try {
 				$this->detector->clean();
 			} catch (\Throwable $e) {
-				$this->log('Manual face ' . $faceId . ': could not remove the temporary files (' . $e->getMessage() . ')');
+				$this->warn('Manual face ' . $faceId . ': could not remove the temporary files (' . $e->getMessage() . ')');
 			}
 		}
 	}
@@ -227,7 +227,7 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 		try {
 			$this->faceMapper->markManualFaceNotGroupable($faceId);
 		} catch (\Throwable $e) {
-			$this->log('Manual face ' . $faceId . ': could not record that it has no face either (' . $e->getMessage() . '), it is left for the next run');
+			$this->warn('Manual face ' . $faceId . ': could not record that it has no face either (' . $e->getMessage() . '), it is left for the next run');
 			$this->logDebug((string) $e);
 		}
 	}
@@ -260,5 +260,13 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 
 	private function log(string $message): void {
 		$this->logInfo(ManualFaceDetector::LOG_PREFIX . $message);
+	}
+
+	/**
+	 * What went wrong, as a warning: in the Nextcloud log at its default level
+	 * when the job runs from cron, where the info lines are not.
+	 */
+	private function warn(string $message): void {
+		$this->logWarning(ManualFaceDetector::LOG_PREFIX . $message);
 	}
 }

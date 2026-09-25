@@ -71,8 +71,11 @@ abstract class ManualFaceTaskTestCase extends TestCase {
 	protected $logger;
 	/** @var FaceRecognitionContext */
 	protected $context;
-	/** @var string[] Every line the task logged */
+	/** @var string[] Every line the task logged, at any level */
 	protected $logged = [];
+
+	/** @var string[] The lines the task logged as warnings */
+	protected $warned = [];
 
 	public function setUp(): void {
 		parent::setUp();
@@ -95,8 +98,13 @@ abstract class ManualFaceTaskTestCase extends TestCase {
 
 		$this->logged = [];
 		$this->logger = $this->createMock(LoggerInterface::class);
+		$this->warned = [];
 		$this->logger->method('info')->willReturnCallback(function ($message) {
 			$this->logged[] = (string) $message;
+		});
+		$this->logger->method('warning')->willReturnCallback(function ($message) {
+			$this->logged[] = (string) $message;
+			$this->warned[] = (string) $message;
 		});
 
 		$user = $this->createMock(IUser::class);
@@ -151,5 +159,19 @@ abstract class ManualFaceTaskTestCase extends TestCase {
 			}
 		}
 		$this->fail('Nothing logged with "' . $fragment . '", only: ' . implode(' | ', $this->logged));
+	}
+
+	/**
+	 * A failure has to be a warning: the info lines are not in the Nextcloud
+	 * log at its default level, when the job runs from cron.
+	 */
+	protected function assertWarned(string $fragment): void {
+		foreach ($this->warned as $line) {
+			if (strpos($line, $fragment) !== false) {
+				$this->addToAssertionCount(1);
+				return;
+			}
+		}
+		$this->fail('No warning with "' . $fragment . '", the warnings were: ' . implode(' | ', $this->warned));
 	}
 }

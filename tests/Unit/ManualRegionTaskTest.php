@@ -191,7 +191,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->assertTrue($this->runTask($this->task()));
 
 		$this->assertEquals([1, 3], $done);
-		$this->assertLogged('[manual faces] Region 2 on file 404');
+		$this->assertWarned('[manual faces] Region 2 on file 404');
 	}
 
 	/**
@@ -224,7 +224,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->regionMapper->method('findPending')->willThrowException(new \Error('no such table'));
 
 		$this->assertTrue($this->runTask($this->task()));
-		$this->assertLogged('[manual faces] The regions marked by hand could not be searched');
+		$this->assertWarned('[manual faces] The regions marked by hand could not be searched');
 	}
 
 	/**
@@ -238,7 +238,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->model->expects($this->never())->method('open');
 
 		$this->assertTrue($this->runTask($this->task()));
-		$this->assertLogged('migration');
+		$this->assertWarned('migration');
 	}
 
 	/**
@@ -251,6 +251,6 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->regionMapper->expects($this->never())->method('findPending');
 
 		$this->assertTrue($this->runTask($this->task()));
-		$this->assertLogged('migration');
+		$this->assertWarned('migration');
 	}
 }

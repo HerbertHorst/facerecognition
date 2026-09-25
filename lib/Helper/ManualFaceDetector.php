@@ -231,6 +231,22 @@ class ManualFaceDetector {
 	}
 
 	/**
+	 * Why the file of a photo cannot be read at all, or null if it can. The
+	 * loader would only say that it cannot load it; this tells the admin what
+	 * to look at. The path itself is left out, since the reason is also shown
+	 * to the user with the region.
+	 */
+	public static function unreadableReason(string $localPath): ?string {
+		if (!file_exists($localPath)) {
+			return 'the file of the photo is missing on the storage';
+		}
+		if (!is_readable($localPath)) {
+			return 'the file of the photo is not readable for the web server, check its permissions';
+		}
+		return null;
+	}
+
+	/**
 	 * A box as the edges FaceRect compares.
 	 *
 	 * @param array{x: int, y: int, width: int, height: int} $rect
@@ -266,9 +282,13 @@ class ManualFaceDetector {
 		// an AVIF is cropped from the same image the model saw. No maximum area
 		// is imposed here: the rectangle is in pixels of the original image, and
 		// a downscale would put the crop somewhere else.
+		$unreadable = self::unreadableReason($localPath);
+		if (!is_null($unreadable)) {
+			throw new \RuntimeException($unreadable);
+		}
 		$image = ImageUtil::loadFromPath($localPath, true, null);
 		if (is_null($image)) {
-			throw new \RuntimeException('the photo cannot be loaded');
+			throw new \RuntimeException('the photo cannot be loaded, it may be damaged or of a format that cannot be read');
 		}
 
 		$crop = self::cropRect($image->width(), $image->height(), $rect, $marginX, $marginY);

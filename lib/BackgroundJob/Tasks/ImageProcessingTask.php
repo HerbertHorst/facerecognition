@@ -178,7 +178,7 @@ class ImageProcessingTask extends FaceRecognitionBackgroundTask {
 
 		$this->manualFacesKnown = $this->faceMapper->hasManualStateColumn();
 		if (!$this->manualFacesKnown) {
-			$this->logInfo(ManualFaceDetector::LOG_PREFIX . 'The faces marked by hand have no state yet, since the database migration of the app did not run: the found faces are not matched with them');
+			$this->logWarning(ManualFaceDetector::LOG_PREFIX . 'The faces marked by hand have no state yet, since the database migration of the app did not run: the found faces are not matched with them');
 		}
 		$images = $context->propertyBag['images'];
 		foreach($images as $image) {
@@ -503,7 +503,7 @@ class ImageProcessingTask extends FaceRecognitionBackgroundTask {
 			try {
 				return $this->resolveManualFaces($image, $faces, $refined);
 			} catch (\Throwable $e) {
-				$this->logInfo(ManualFaceDetector::LOG_PREFIX . 'Image ' . $image->getId() . ': the found faces could not be matched with the ones put there by hand (' . $e->getMessage() . '), processing it as before');
+				$this->logWarning(ManualFaceDetector::LOG_PREFIX . 'Image ' . $image->getId() . ': the found faces could not be matched with the ones put there by hand (' . $e->getMessage() . '), processing it as before');
 				$this->logDebug((string) $e);
 			}
 		}
