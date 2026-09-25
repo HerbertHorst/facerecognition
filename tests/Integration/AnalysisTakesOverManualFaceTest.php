@@ -71,7 +71,7 @@ class AnalysisTakesOverManualFaceTest extends ManualFaceIntegrationTestCase {
 		$row = $this->row($faceIds[0]);
 
 		$this->container->query(FaceMapper::class)->removeFromImage($this->image->getId());
-		$imageMapper->resetImage($imageMapper->find($this->user->getUID(), $this->image->getId()));
+		$imageMapper->resetImage($this->image);
 
 		return ['x' => $row['x'], 'y' => $row['y'], 'width' => $row['width'], 'height' => $row['height']];
 	}

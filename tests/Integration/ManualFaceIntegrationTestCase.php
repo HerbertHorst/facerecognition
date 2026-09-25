@@ -151,8 +151,15 @@ abstract class ManualFaceIntegrationTestCase extends IntegrationTestCase {
 
 		$this->scanImages();
 
-		$image = $this->container->query(ImageMapper::class)->findFromFile($this->user->getUID(), self::MODEL_ID, $fileId);
-		$this->assertNotNull($image, 'The scan must have registered ' . $name);
+		$imageMapper = $this->container->query(ImageMapper::class);
+		$found = $imageMapper->findFromFile($this->user->getUID(), self::MODEL_ID, $fileId);
+		$this->assertNotNull($found, 'The scan must have registered ' . $name);
+		// Neither findFromFile() nor find() reads every column, and the tests
+		// need the file, the user and the model (resetImage() looks for the
+		// image by them).
+		$image = $imageMapper->find($this->user->getUID(), $found->getId());
+		$image->setUser($this->user->getUID());
+		$image->setModel(self::MODEL_ID);
 		return $image;
 	}
 
@@ -195,7 +202,7 @@ abstract class ManualFaceIntegrationTestCase extends IntegrationTestCase {
 	 * A face as the search of a region creates it, with a descriptor that is
 	 * not the one of any real face.
 	 */
-	protected function insertRescanFace(int $imageId, array $box, array $descriptor = null): Face {
+	protected function insertRescanFace(int $imageId, array $box, ?array $descriptor = null): Face {
 		$face = new Face();
 		$face->image = $imageId;
 		$face->x = $box['x'];

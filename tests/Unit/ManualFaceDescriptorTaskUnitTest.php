@@ -66,7 +66,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 			->with(7, [0.5, 0.6], 40, 40, 50, 50, 0.42, false);
 		$this->faceMapper->expects($this->never())->method('markManualFaceNotGroupable');
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 	}
 
 	/**
@@ -83,7 +83,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
 			->with(7, $this->anything(), 20, 20, 40, 40, 1.02, true);
 
-		$this->run($this->task());
+		$this->runTask($this->task());
 	}
 
 	/**
@@ -99,7 +99,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->never())->method('setManualFaceDescriptor');
 		$this->faceMapper->expects($this->once())->method('markManualFaceNotGroupable')->with(7);
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 	}
 
 	/**
@@ -114,7 +114,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
 			->with(7, $this->anything(), 44, 44, 42, 42, 1.02, false);
 
-		$this->run($this->task());
+		$this->runTask($this->task());
 	}
 
 	/**
@@ -134,7 +134,30 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
 			->with(7, $this->anything(), 44, 44, 36, 36, 1.0, false);
 
-		$this->run($this->task());
+		$this->runTask($this->task());
+	}
+
+	/**
+	 * The photo is looked for in the files of the user of the marking. The
+	 * FileService keeps the user a task before set up, and would otherwise look
+	 * in the files of that one.
+	 */
+	public function testThePhotoIsLookedForInTheFilesOfTheUserOfTheMarking() {
+		$this->migratedWith([self::pending(7)]);
+		$this->modelFinds([self::rawFace(20, 20, 70, 70, 1.0)]);
+
+		$calls = [];
+		$this->fileService->method('setupFS')->willReturnCallback(function (string $userId) use (&$calls) {
+			$calls[] = 'setupFS ' . $userId;
+		});
+		$this->fileService->method('getFileById')->willReturnCallback(function (int $fileId, $userId) use (&$calls) {
+			$calls[] = 'getFileById ' . $fileId;
+			return $this->createMock(File::class);
+		});
+
+		$this->runTask($this->task());
+
+		$this->assertEquals(['setupFS ' . self::USER, 'getFileById 500'], $calls);
 	}
 
 	/**
@@ -149,7 +172,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->never())->method('setManualFaceDescriptor');
 		$this->faceMapper->expects($this->once())->method('markManualFaceNotGroupable')->with(7);
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 	}
 
 	/**
@@ -167,7 +190,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
 			->with(8, $this->anything(), 40, 40, 50, 50, 1.0, false);
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertLogged('[manual faces] Manual face 7 on file 404');
 	}
 
@@ -191,7 +214,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 			});
 		$this->faceMapper->expects($this->once())->method('markManualFaceNotGroupable')->with(7);
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertEquals([8], $stored);
 	}
 
@@ -203,7 +226,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->method('hasManualStateColumn')->willReturn(true);
 		$this->faceMapper->method('findManualFacesPendingDescriptor')->willThrowException(new \Error('no such table'));
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertLogged('[manual faces] The faces marked by hand could not be searched');
 	}
 
@@ -221,7 +244,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 
 		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')->with(8);
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 	}
 
 	/**
@@ -233,7 +256,7 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->expects($this->never())->method('findManualFacesPendingDescriptor');
 		$this->model->expects($this->never())->method('open');
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertLogged('migration');
 	}
 
@@ -244,6 +267,6 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->migratedWith([]);
 		$this->model->expects($this->never())->method('open');
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 	}
 }

@@ -100,7 +100,7 @@ class ImageProcessingManualFacesTest extends ManualFaceTaskTestCase {
 
 		$task = new ImageProcessingTask($this->imageMapper, $this->faceMapper, $this->fileService,
 			$this->settingsService, $this->modelManager, $this->createMock(ILockingProvider::class));
-		$this->assertTrue($this->run($task));
+		$this->assertTrue($this->runTask($task));
 		$this->assertNotNull($this->processed, 'The photo must have been processed');
 		$this->assertNull($this->processed['error'], 'The photo must not record an error');
 	}

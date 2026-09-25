@@ -101,7 +101,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->regionMapper->expects($this->once())->method('markDone')->with(3, 3, 1, 1);
 		$this->regionMapper->expects($this->never())->method('markFailed');
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 
 		$this->assertCount(3, $this->inserted);
 		$face = $this->inserted[2];
@@ -127,7 +127,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 
 		$this->regionMapper->expects($this->once())->method('markDone')->with(3, 1, 0, 0);
 
-		$this->run($this->task());
+		$this->runTask($this->task());
 
 		$this->assertCount(1, $this->inserted);
 		$this->assertEquals(80, $this->inserted[0]->y);
@@ -148,7 +148,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$finds = [self::rawFace(10, 10, 60, 60, 1.05), self::rawFace(80, 80, 130, 130, 1.05)];
 		$this->modelFinds($finds, $finds);
 
-		$this->run($this->task());
+		$this->runTask($this->task());
 
 		$this->assertCount(2, $this->inserted);
 	}
@@ -164,7 +164,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 
 		$this->regionMapper->expects($this->once())->method('markDone')->with(3, 0, 0, 0);
 
-		$this->run($this->task());
+		$this->runTask($this->task());
 
 		$this->assertCount(0, $this->inserted);
 	}
@@ -188,7 +188,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->regionMapper->expects($this->once())->method('markFailed')
 			->with(2, $this->stringContains('404'));
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 
 		$this->assertEquals([1, 3], $done);
 		$this->assertLogged('[manual faces] Region 2 on file 404');
@@ -212,7 +212,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->regionMapper->expects($this->once())->method('markFailed')->with(1, 'broken');
 		$this->regionMapper->expects($this->once())->method('markDone')->with(2, 1, 0, 0);
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 	}
 
 	/**
@@ -223,7 +223,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->method('hasManualStateColumn')->willReturn(true);
 		$this->regionMapper->method('findPending')->willThrowException(new \Error('no such table'));
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertLogged('[manual faces] The regions marked by hand could not be searched');
 	}
 
@@ -237,7 +237,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->regionMapper->expects($this->never())->method('findPending');
 		$this->model->expects($this->never())->method('open');
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertLogged('migration');
 	}
 
@@ -250,7 +250,7 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 		$this->faceMapper->method('hasManualStateColumn')->willReturn(false);
 		$this->regionMapper->expects($this->never())->method('findPending');
 
-		$this->assertTrue($this->run($this->task()));
+		$this->assertTrue($this->runTask($this->task()));
 		$this->assertLogged('migration');
 	}
 }

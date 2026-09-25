@@ -96,6 +96,11 @@ class ManualFaceDetector {
 	 * @throws \RuntimeException if the photo cannot be read, or the region is not on it
 	 */
 	public function detect(IModel $model, string $userId, int $fileId, array $rect, int $marginX, int $marginY, ?int $faceSide = null): array {
+		// FileService keeps the user of the last setupFS() and prefers it to
+		// the one it is given, and the tasks before this one set up each user
+		// in turn: without this, the file would be looked for in the folder of
+		// whichever user came last, and not be found.
+		$this->fileService->setupFS($userId);
 		$node = $this->fileService->getFileById($fileId, $userId);
 		if (!($node instanceof File)) {
 			throw new \RuntimeException('the file ' . $fileId . ' is not available');

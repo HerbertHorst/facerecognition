@@ -136,7 +136,7 @@ abstract class ManualFaceTaskTestCase extends TestCase {
 	 *
 	 * @return mixed what the task returned
 	 */
-	protected function run($task) {
+	protected function runTask($task) {
 		$generator = $task->execute($this->context);
 		foreach ($generator as $_) {
 		}

@@ -43,12 +43,24 @@ class ManualFaceBackgroundServiceTest extends ManualFaceIntegrationTestCase {
 	 * after all of them, as in the deferred mode.
 	 */
 	public function testAFailingMarkingAndRegionDoNotStopTheRun() {
+		// The admin sets it on a real instance; without it the requirements
+		// check stops the whole run before any task of interest.
+		$this->setAppValue('analysis_image_area', (string) (1024 * 1024));
+
+		// The photo is analyzed beforehand: otherwise the analysis of the run
+		// finds the face first and takes the marking over (see
+		// AnalysisTakesOverManualFaceTest), and the search of the marking,
+		// which is what this test is about, would have nothing left to do.
+		// It comes before the missing file, whose image the analysis would
+		// report as stale, and the run would then remove it.
+		$image = $this->upload('big.jpg', $this->lennaScaled(3));
+		$this->analyze(false);
+
 		$missing = $this->imageOfAMissingFile();
 		$brokenMarking = $this->insertMarking($missing->getId(), 10, 10, 100, 100);
 		$regionMapper = $this->container->query(ManualRegionMapper::class);
 		$brokenRegion = $regionMapper->enqueue($missing->getId(), 0, 0, 100, 100);
 
-		$image = $this->upload('big.jpg', $this->lennaScaled(3));
 		$marking = $this->insertMarking($image->getId(), 120, 150, 300, 300);
 		$region = $regionMapper->enqueue($image->getId(), 0, 0, 474, 474);
 
@@ -64,7 +76,7 @@ class ManualFaceBackgroundServiceTest extends ManualFaceIntegrationTestCase {
 		$this->assertEquals(Face::MANUAL_STATE_FOUND, $row['manual_state']);
 		$this->assertEquals(ManualRegion::STATE_DONE, $this->stateOfRegion($image->getId(), $region->getId()));
 
-		// The analysis ran before them, and the clustering after them.
+		// The clustering ran after them.
 		$imageMapper = $this->container->query(ImageMapper::class);
 		$this->assertTrue($imageMapper->find($this->user->getUID(), $image->getId())->getIsProcessed());
 		$this->assertNotNull($row['cluster'], 'The clustering must have run after the search');
