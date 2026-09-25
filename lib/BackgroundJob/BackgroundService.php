@@ -39,6 +39,7 @@ use OCA\FaceRecognition\BackgroundJob\Tasks\DisabledUserRemovalTask;
 use OCA\FaceRecognition\BackgroundJob\Tasks\EnumerateImagesMissingFacesTask;
 use OCA\FaceRecognition\BackgroundJob\Tasks\ImageProcessingTask;
 use OCA\FaceRecognition\BackgroundJob\Tasks\ManualFaceDescriptorTask;
+use OCA\FaceRecognition\BackgroundJob\Tasks\ManualRegionTask;
 use OCA\FaceRecognition\BackgroundJob\Tasks\StaleImagesRemovalTask;
 
 use Symfony\Component\Console\Output\OutputInterface;
@@ -238,6 +239,7 @@ class BackgroundService {
 				$task_classes[] = EnumerateImagesMissingFacesTask::class;
 				$task_classes[] = ImageProcessingTask::class;
 				$task_classes[] = ManualFaceDescriptorTask::class;
+				$task_classes[] = ManualRegionTask::class;
 				$task_classes[] = CreateClustersTask::class;
 				break;
 			case 'default-mode':
@@ -249,6 +251,7 @@ class BackgroundService {
 				$task_classes[] = EnumerateImagesMissingFacesTask::class;
 				$task_classes[] = ImageProcessingTask::class;
 				$task_classes[] = ManualFaceDescriptorTask::class;
+				$task_classes[] = ManualRegionTask::class;
 				break;
 		}
 

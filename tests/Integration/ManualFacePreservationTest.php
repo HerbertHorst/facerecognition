@@ -20,11 +20,13 @@
  */
 namespace OCA\FaceRecognition\Tests\Integration;
 
+use OCA\FaceRecognition\Db\ClusterMapper;
 use OCA\FaceRecognition\Db\Face;
 use OCA\FaceRecognition\Db\FaceMapper;
 use OCA\FaceRecognition\Db\Image;
 use OCA\FaceRecognition\Db\ImageMapper;
 use OCA\FaceRecognition\Model\ModelManager;
+use OCA\FaceRecognition\Service\SettingsService;
 
 /**
  * Regression test for manual-face preservation.
@@ -36,7 +38,7 @@ use OCA\FaceRecognition\Model\ModelManager;
  *
  * @group DB
  */
-class ManualFacePreservationTest extends IntegrationTestCase {
+class ManualFacePreservationTest extends ManualFaceIntegrationTestCase {
 
 	public function testImageProcessedKeepsManualFaces(): void {
 		/** @var ImageMapper $imageMapper */
@@ -77,6 +79,48 @@ class ManualFacePreservationTest extends IntegrationTestCase {
 		$this->assertCount(2, $idsAfter, 'Expected manual face + freshly detected face');
 		$this->assertContains($manual->getId(), $idsAfter, 'Manual face must survive re-processing');
 		$this->assertNotContains($detected->getId(), $idsAfter, 'Old detected face should be replaced');
+	}
+
+	/**
+	 * A marking with a name, where the search finds no face, stays on the
+	 * photo with its name: through the search, the clustering and a new
+	 * analysis of the photo. It takes no part in the clustering, and so it
+	 * never draws another face into its person.
+	 */
+	public function testANamedMarkingWithoutAFaceKeepsItsNameAndStaysOutOfTheClustering(): void {
+		$faceMapper = $this->container->query(FaceMapper::class);
+		$imageMapper = $this->container->query(ImageMapper::class);
+		$settingsService = $this->container->query(SettingsService::class);
+
+		$image = $this->upload('black.jpg', $this->black());
+		$clusterId = $this->clusterOf('Anna');
+		$marking = $this->insertMarking($image->getId(), 10, 10, 100, 100, $clusterId);
+
+		$this->runDescriptorTask();
+
+		$row = $this->row($marking->getId());
+		$this->assertEquals(Face::MANUAL_STATE_NO_FACE, $row['manual_state']);
+		$this->assertEquals($clusterId, $row['cluster']);
+		$this->assertEquals('Anna', $this->nameOfCluster($clusterId));
+
+		// Not a sample of its cluster, so nothing joins the person through it.
+		list($samples) = $faceMapper->findClusterSamples($this->user->getUID(), self::MODEL_ID,
+			$settingsService->getMinimumFaceSize(), $settingsService->getMinimumConfidence(), 10);
+		$this->assertArrayNotHasKey($marking->getId(), $samples);
+
+		$other = $this->insertDetectedFace(self::descriptor(0.0), 100, 1.0);
+		$this->runClustering();
+		$this->assertNotEquals($clusterId, $this->row($other->getId())['cluster']);
+
+		// Analyzing the photo again leaves it where it is, with its name.
+		$imageMapper->imageProcessed($imageMapper->find($this->user->getUID(), $image->getId()), [], 5, null, true);
+
+		$row = $this->row($marking->getId());
+		$this->assertNotNull($row);
+		$this->assertEquals($clusterId, $row['cluster']);
+		$this->assertEquals([10, 10, 100, 100], [$row['x'], $row['y'], $row['width'], $row['height']]);
+		$this->assertEquals('Anna', $this->nameOfCluster($clusterId));
+		$this->assertEquals(1, $this->container->query(ClusterMapper::class)->countClusterFaces($clusterId));
 	}
 
 	/**

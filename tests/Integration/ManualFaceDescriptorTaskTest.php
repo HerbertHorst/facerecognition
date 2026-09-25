@@ -20,165 +20,126 @@
  */
 namespace OCA\FaceRecognition\Tests\Integration;
 
-use OC\Files\View;
-
-use OCA\FaceRecognition\BackgroundJob\Tasks\AddMissingImagesTask;
-use OCA\FaceRecognition\BackgroundJob\Tasks\ManualFaceDescriptorTask;
-
 use OCA\FaceRecognition\Db\Face;
-use OCA\FaceRecognition\Db\Image;
+use OCA\FaceRecognition\Db\FaceMapper;
+
+use OCA\FaceRecognition\Helper\ManualFaceDetector;
 
 use OCA\FaceRecognition\Model\ModelManager;
 
+use OCA\FaceRecognition\Service\FileService;
+
 /**
- * Integration coverage for ManualFaceDescriptorTask: a manual face flagged for
- * clustering should get a real descriptor when the model finds a face in the
- * marked region, and should be excluded from clustering (no crash, no fake
- * descriptor) when it does not.
+ * Integration coverage for ManualFaceDescriptorTask: a manual face should get a
+ * real descriptor, and the confidence the detector really gave it, when the
+ * model finds a face in the marked region, and should be excluded from
+ * clustering (no crash, no fake descriptor) when it does not. Either way the
+ * outcome is recorded in its state, and it is not searched again.
  *
  * @group DB
  */
-class ManualFaceDescriptorTaskTest extends IntegrationTestCase {
-
-	public function setUp(): void {
-		parent::setUp();
-
-		$this->originalMinImageSize = intval($this->config->getAppValue('facerecognition', 'min_image_size', '512'));
-		$this->originalMaxImageArea = intval($this->config->getAppValue('facerecognition', 'max_image_area', 0));
-		$this->config->setAppValue('facerecognition', 'min_image_size', 1);
-		$this->config->setAppValue('facerecognition', 'max_image_area', 200 * 200);
-
-		$model = $this->container->query('OCA\FaceRecognition\Model\DlibCnnModel\DlibCnn5Model');
-		$model->install();
-	}
-
-	public function tearDown(): void {
-		$this->config->setAppValue('facerecognition', 'min_image_size', $this->originalMinImageSize);
-		$this->config->setAppValue('facerecognition', 'max_image_area', $this->originalMaxImageArea);
-
-		parent::tearDown();
-	}
+class ManualFaceDescriptorTaskTest extends ManualFaceIntegrationTestCase {
 
 	/**
-	 * A manual face drawn over a real face gets a descriptor and stays groupable.
+	 * A manual face drawn over a real face gets a descriptor, the box of the
+	 * face and the confidence the detector gave it, and it is found.
 	 */
 	public function testDescriptorComputedForRealFace() {
-		$faceMapper = $this->container->query('OCA\FaceRecognition\Db\FaceMapper');
+		$image = $this->upload('lenna.jpg', $this->lenna());
+		// A generous box that covers the face in lenna.jpg (158x158).
+		$face = $this->insertMarking($image->getId(), 10, 10, 138, 138);
 
-		// A generous box that covers the face in lenna.jpg (512x512).
-		$faceId = $this->setupManualFace('lenna.jpg', 20, 20, 472, 472);
+		$this->runDescriptorTask();
 
-		$this->runManualFaceDescriptorTask();
-
-		$face = $faceMapper->find($faceId);
-		$this->assertNotEmpty($face->descriptor, 'A descriptor must be computed for the marked face');
+		$row = $this->row($face->getId());
+		$this->assertNotEmpty($row['descriptor'], 'A descriptor must be computed for the marked face');
+		$this->assertEquals(Face::MANUAL_STATE_FOUND, $row['manual_state']);
+		$this->assertTrue($row['is_groupable']);
 
 		// The stored box must snap to the detected face, not stay as the generous
 		// user rectangle, so box and descriptor describe the same face.
-		$this->assertLessThan(472, $face->getWidth(), 'Box width should shrink to the detected face');
-		$this->assertLessThan(472, $face->getHeight(), 'Box height should shrink to the detected face');
-		$this->assertGreaterThan(0, $face->getWidth());
-		$this->assertGreaterThan(0, $face->getHeight());
-		// The detected box must stay within the original image bounds (512x512).
-		$this->assertGreaterThanOrEqual(0, $face->getX());
-		$this->assertGreaterThanOrEqual(0, $face->getY());
-		$this->assertLessThanOrEqual(512, $face->getX() + $face->getWidth());
-		$this->assertLessThanOrEqual(512, $face->getY() + $face->getHeight());
+		$this->assertLessThan(138, $row['width'], 'Box width should shrink to the detected face');
+		$this->assertLessThan(138, $row['height'], 'Box height should shrink to the detected face');
+		$this->assertGreaterThan(0, $row['width']);
+		$this->assertGreaterThan(0, $row['height']);
+		// The detected box must stay within the original image bounds.
+		$this->assertGreaterThanOrEqual(0, $row['x']);
+		$this->assertGreaterThanOrEqual(0, $row['y']);
+		$this->assertLessThanOrEqual(158, $row['x'] + $row['width']);
+		$this->assertLessThanOrEqual(158, $row['y'] + $row['height']);
+
+		// The confidence is the one of the detection, found again here with the
+		// same crop, and not a value assumed for it.
+		$detected = $this->detectAgain($image->getFile(), ['x' => 10, 'y' => 10, 'width' => 138, 'height' => 138]);
+		$this->assertEqualsWithDelta($detected['confidence'], $row['confidence'], 0.0001);
+		$this->assertEquals([$detected['x'], $detected['y'], $detected['width'], $detected['height']],
+			[$row['x'], $row['y'], $row['width'], $row['height']]);
 
 		// No longer pending: it now has a descriptor and will be clustered.
-		$pending = $faceMapper->findManualFacesPendingDescriptor($this->user->getUID(), ModelManager::DEFAULT_FACE_MODEL_ID);
-		$this->assertCount(0, $pending);
+		$this->assertCount(0, $this->pendingMarkings());
 	}
 
 	/**
 	 * A manual face drawn where there is no face is excluded from clustering
-	 * (no descriptor, no exception).
+	 * (no descriptor, no exception), and records that there was no face.
 	 */
 	public function testNoFaceLeavesFaceWithoutDescriptor() {
-		$faceMapper = $this->container->query('OCA\FaceRecognition\Db\FaceMapper');
+		$image = $this->upload('black.jpg', $this->black());
+		$face = $this->insertMarking($image->getId(), 10, 10, 100, 100);
 
-		$faceId = $this->setupManualFace('black.jpg', 10, 10, 100, 100);
+		$this->runDescriptorTask();
 
-		$this->runManualFaceDescriptorTask();
+		$row = $this->row($face->getId());
+		$this->assertEmpty($row['descriptor'], 'No descriptor should be stored when no face is found');
+		$this->assertEquals(Face::MANUAL_STATE_NO_FACE, $row['manual_state']);
+		$this->assertFalse($row['is_groupable']);
+		// The drawn box stays.
+		$this->assertEquals([10, 10, 100, 100], [$row['x'], $row['y'], $row['width'], $row['height']]);
 
-		$face = $faceMapper->find($faceId);
-		$this->assertEmpty($face->descriptor, 'No descriptor should be stored when no face is found');
-
-		// It gave up (is_groupable = false) and is not retried.
-		$pending = $faceMapper->findManualFacesPendingDescriptor($this->user->getUID(), ModelManager::DEFAULT_FACE_MODEL_ID);
-		$this->assertCount(0, $pending);
+		$this->assertCount(0, $this->pendingMarkings());
 	}
 
 	/**
-	 * Upload an asset, register its image, and insert a manual face flagged for
-	 * clustering over the given (original-pixel) rectangle.
-	 *
-	 * @return int the inserted face id
+	 * A marking whose file is gone is recorded as having no face, and it is
+	 * not searched again on the next run.
 	 */
-	private function setupManualFace(string $asset, int $x, int $y, int $w, int $h): int {
-		$imageMapper = $this->container->query('OCA\FaceRecognition\Db\ImageMapper');
-		$faceMapper = $this->container->query('OCA\FaceRecognition\Db\FaceMapper');
+	public function testAMarkingThatFailsIsNotSearchedAgain() {
+		$image = $this->imageOfAMissingFile();
+		$face = $this->insertMarking($image->getId(), 10, 10, 100, 100);
+		$this->assertCount(1, $this->pendingMarkings());
 
-		// Upload the asset and let the scan register an image row for it.
-		$this->loginAsUser($this->user->getUID());
-		$view = new View('/' . $this->user->getUID() . '/files');
-		$view->file_put_contents($asset, file_get_contents(\OC::$SERVERROOT . '/apps/facerecognition/tests/assets/' . $asset));
-		$this->doMissingImageScan($this->user);
+		$this->runDescriptorTask();
 
-		$images = $imageMapper->findImages($this->user->getUID(), ModelManager::DEFAULT_FACE_MODEL_ID);
-		$this->assertEquals(1, count($images));
-		$imageId = $images[0]->getId();
+		$this->assertEquals(Face::MANUAL_STATE_NO_FACE, $this->row($face->getId())['manual_state']);
+		$this->assertCount(0, $this->pendingMarkings());
 
-		$face = new Face();
-		$face->setImage($imageId);
-		$face->setX($x);
-		$face->setY($y);
-		$face->setWidth($w);
-		$face->setHeight($h);
-		$face->setConfidence(1.0);
-		$face->landmarks = [];
-		$face->descriptor = [];
-		$face->isGroupable = true; // flagged for clustering -> pending descriptor
-		$face = $faceMapper->insertManualFace($face);
-
-		// Precondition: it is pending before the task runs.
-		$pending = $faceMapper->findManualFacesPendingDescriptor($this->user->getUID(), ModelManager::DEFAULT_FACE_MODEL_ID);
-		$this->assertCount(1, $pending);
-
-		return $face->getId();
+		// The next run leaves it alone.
+		$this->runDescriptorTask();
+		$this->assertEquals(Face::MANUAL_STATE_NO_FACE, $this->row($face->getId())['manual_state']);
+		$this->assertCount(0, $this->pendingMarkings());
 	}
 
-	private function runManualFaceDescriptorTask(): void {
-		$faceMapper = $this->container->query('OCA\FaceRecognition\Db\FaceMapper');
-		$fileService = $this->container->query('OCA\FaceRecognition\Service\FileService');
-		$settingsService = $this->container->query('OCA\FaceRecognition\Service\SettingsService');
-		$modelManager = $this->container->query('OCA\FaceRecognition\Model\ModelManager');
-		$tempManager = $this->container->query('OCP\ITempManager');
-
-		$task = new ManualFaceDescriptorTask($faceMapper, $fileService, $settingsService, $modelManager, $tempManager);
-		$this->assertNotEquals("", $task->description());
-
-		$this->context->user = $this->user;
-
-		$generator = $task->execute($this->context);
-		foreach ($generator as $_) {
-		}
-		$this->assertEquals(true, $generator->getReturn());
+	private function pendingMarkings(): array {
+		return $this->container->query(FaceMapper::class)
+			->findManualFacesPendingDescriptor($this->user->getUID(), ModelManager::DEFAULT_FACE_MODEL_ID);
 	}
 
-	private function doMissingImageScan($contextUser = null): void {
-		$this->config->setUserValue($this->user->getUID(), 'facerecognition', AddMissingImagesTask::FULL_IMAGE_SCAN_DONE_KEY, 'false');
+	/**
+	 * What the detector finds in the region of a marking, the biggest face,
+	 * as the task searches it.
+	 */
+	private function detectAgain(int $fileId, array $rect): array {
+		$model = $this->container->query(ModelManager::class)->getCurrentModel();
+		$model->open();
+		$detector = new ManualFaceDetector($this->container->query(FileService::class), $this->container->query('OCP\ITempManager'));
+		$faces = $detector->detect($model, $this->user->getUID(), $fileId, $rect,
+			(int) round($rect['width'] * 0.4), (int) round($rect['height'] * 0.4));
+		$detector->clean();
 
-		$imageMapper = $this->container->query('OCA\FaceRecognition\Db\ImageMapper');
-		$fileService = $this->container->query('OCA\FaceRecognition\Service\FileService');
-		$settingsService = $this->container->query('OCA\FaceRecognition\Service\SettingsService');
-		$addMissingImagesTask = new AddMissingImagesTask($imageMapper, $fileService, $settingsService);
-
-		$this->context->user = $contextUser;
-
-		$generator = $addMissingImagesTask->execute($this->context);
-		foreach ($generator as $_) {
-		}
-		$this->assertEquals(true, $generator->getReturn());
+		$this->assertNotEmpty($faces);
+		usort($faces, function (array $a, array $b) {
+			return ($b['width'] * $b['height']) <=> ($a['width'] * $a['height']);
+		});
+		return $faces[0];
 	}
 }

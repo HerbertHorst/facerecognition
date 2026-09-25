@@ -144,6 +144,41 @@ class ClusterMapper extends QBMapper {
 		return $clusters;
 	}
 
+	/**
+	 * The name of the person of each of the given clusters of the user, in one
+	 * query however many clusters there are. A cluster nobody named has a null
+	 * name, and a cluster that is not the user's is left out.
+	 *
+	 * @param int[] $clusterIds
+	 *
+	 * @return array<int, string|null> [clusterId => name]
+	 */
+	public function findPersonNames(string $userId, array $clusterIds): array {
+		$names = [];
+		$clusterIds = array_values(array_unique(array_map('intval', $clusterIds)));
+		if (empty($clusterIds)) {
+			return $names;
+		}
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('c.id', 'p.name')
+			->from($this->getTableName(), 'c')
+			->leftJoin('c', 'facerecog_persons', 'p', $qb->expr()->eq('c.person', 'p.id'))
+			->where($qb->expr()->eq('c.user', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->in('c.id', $qb->createParameter('cluster_ids')));
+
+		foreach (array_chunk($clusterIds, 1000) as $chunk) {
+			$qb->setParameter('cluster_ids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
+			$result = $qb->executeQuery();
+			while ($row = $result->fetch()) {
+				$names[(int) $row['id']] = is_null($row['name']) ? null : (string) $row['name'];
+			}
+			$result->closeCursor();
+		}
+
+		return $names;
+	}
+
 	public function countClusters(string $userId, int $modelId): int {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select($qb->createFunction('COUNT(' . $qb->getColumnName('id') . ')'))

@@ -21,15 +21,14 @@
 namespace OCA\FaceRecognition\BackgroundJob\Tasks;
 
 use OCP\ITempManager;
-use OCP\Files\File;
 
 use OCA\FaceRecognition\BackgroundJob\FaceRecognitionBackgroundTask;
 use OCA\FaceRecognition\BackgroundJob\FaceRecognitionContext;
 
 use OCA\FaceRecognition\Db\FaceMapper;
 
-use OCA\FaceRecognition\Helper\ImageUtil;
-use OCA\FaceRecognition\Helper\TempImage;
+use OCA\FaceRecognition\Helper\FaceRect;
+use OCA\FaceRecognition\Helper\ManualFaceDetector;
 
 use OCA\FaceRecognition\Model\IModel;
 use OCA\FaceRecognition\Model\ModelManager;
@@ -38,23 +37,22 @@ use OCA\FaceRecognition\Service\FileService;
 use OCA\FaceRecognition\Service\SettingsService;
 
 /**
- * Task that gives a meaning to the "use for clustering" option of manually added
- * faces. A manual face carries no model descriptor, so it cannot participate in
- * clustering on its own. For each manual face the user flagged for clustering,
- * this task crops the marked region from the original photo and runs face
- * detection on just that crop.
+ * Task that searches the faces the user marked by hand for a descriptor. A
+ * manual face carries no model descriptor, so it cannot participate in
+ * clustering on its own. For each marking that waits for it, this task crops
+ * the marked region from the original photo and runs face detection on just
+ * that crop (see ManualFaceDetector).
  *
- * Why a crop helps even though the full photo was already analysed: the full
- * photo is downscaled to the model's maximum area before detection, so a small
- * face can fall below the detector's size threshold and be missed. The crop is
- * analysed at (near) full resolution, so the same face is large enough to be
- * detected, and its descriptor is comparable to descriptors from full-image
- * detections (dlib aligns the face before computing it).
+ * If a face is found, the marking takes its descriptor, its box and the
+ * confidence the detector gave it, and from then on the clustering treats it
+ * like any other face, minimums included. If no face can be detected in the
+ * marked region, the face is simply excluded from clustering: it stays pinned
+ * to its person, if it has one. No fallback descriptor is fabricated.
  *
- * If no face can be detected in the marked region, the face is simply excluded
- * from clustering (is_groupable = false). It stays pinned to its person. No
- * fallback descriptor is fabricated, and a single bad region never aborts the
- * background job.
+ * Nothing that goes wrong here leaves the task: the background job treats any
+ * exception of a task as fatal, and would stop the analysis and the clustering
+ * of every user with it. A marking that fails is recorded as having no face,
+ * so it is not tried again on every run.
  */
 class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 
@@ -67,17 +65,14 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 	/** @var FaceMapper */
 	private $faceMapper;
 
-	/** @var FileService */
-	private $fileService;
-
 	/** @var SettingsService */
 	private $settingsService;
 
 	/** @var ModelManager */
 	private $modelManager;
 
-	/** @var ITempManager */
-	private $tempManager;
+	/** @var ManualFaceDetector */
+	private $detector;
 
 	public function __construct(FaceMapper      $faceMapper,
 	                            FileService     $fileService,
@@ -88,17 +83,16 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 		parent::__construct();
 
 		$this->faceMapper      = $faceMapper;
-		$this->fileService     = $fileService;
 		$this->settingsService = $settingsService;
 		$this->modelManager    = $modelManager;
-		$this->tempManager     = $tempManager;
+		$this->detector        = new ManualFaceDetector($fileService, $tempManager);
 	}
 
 	/**
 	 * @inheritdoc
 	 */
 	public function description() {
-		return "Compute descriptors for manually added faces flagged for clustering";
+		return "Compute descriptors for the faces marked by hand";
 	}
 
 	/**
@@ -107,10 +101,28 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 	public function execute(FaceRecognitionContext $context) {
 		$this->setContext($context);
 
+		// A failure outside of a single marking, like opening the model or
+		// reading what is pending, costs this task and nothing else of the run.
+		try {
+			yield from $this->searchPendingMarkings();
+		} catch (\Throwable $e) {
+			$this->log('The faces marked by hand could not be searched, they are left for the next run: ' . $e->getMessage());
+			$this->logDebug((string) $e);
+		}
+
+		return true;
+	}
+
+	private function searchPendingMarkings(): \Generator {
+		if (!$this->faceMapper->hasManualStateColumn()) {
+			$this->log('Skipping the faces marked by hand: the database migration of the app did not run yet');
+			return;
+		}
+
 		$model = $this->modelManager->getCurrentModel();
 		if (is_null($model)) {
-			$this->logInfo('No current model configured, skipping manual face descriptor extraction');
-			return true;
+			$this->log('No current model configured, skipping manual face descriptor extraction');
+			return;
 		}
 
 		$modelId = $this->settingsService->getCurrentFaceModel();
@@ -128,14 +140,12 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 				$opened = true;
 			}
 
-			$this->logInfo('Computing descriptors for ' . count($pending) . ' manual face(s) of user ' . $userId);
+			$this->log('Computing descriptors for ' . count($pending) . ' manual face(s) of user ' . $userId);
 			foreach ($pending as $row) {
 				$this->computeDescriptorForFace($model, $userId, $row);
 				yield;
 			}
 		}
-
-		return true;
 	}
 
 	/**
@@ -146,181 +156,97 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 	 */
 	private function computeDescriptorForFace(IModel $model, string $userId, array $row): void {
 		$faceId = (int) $row['id'];
+		$drawn = [
+			'x'      => (int) $row['x'],
+			'y'      => (int) $row['y'],
+			'width'  => (int) $row['width'],
+			'height' => (int) $row['height'],
+		];
+
 		try {
-			$node = $this->fileService->getFileById((int) $row['file'], $userId);
-			if (!($node instanceof File)) {
-				$this->logInfo('Manual face ' . $faceId . ': source file unavailable, excluding it from clustering');
-				$this->faceMapper->markManualFaceNotGroupable($faceId);
+			$faces = $this->detector->detect($model, $userId, (int) $row['file'], $drawn,
+				(int) round($drawn['width'] * self::CROP_MARGIN),
+				(int) round($drawn['height'] * self::CROP_MARGIN));
+
+			if (count($faces) === 0) {
+				$this->log('Manual face ' . $faceId . ': no face detected in the marked region, excluding it from clustering');
+				$this->giveUp($faceId);
 				return;
 			}
 
-			$localPath = $this->fileService->getLocalFile($node);
-			if ($localPath === null) {
-				$this->faceMapper->markManualFaceNotGroupable($faceId);
-				return;
-			}
-
-			$crop = $this->cropRegion(
-				$localPath,
-				$model->getPreferredMimeType(),
-				(int) $row['x'], (int) $row['y'], (int) $row['width'], (int) $row['height']
-			);
-			if ($crop === null) {
-				$this->faceMapper->markManualFaceNotGroupable($faceId);
-				return;
-			}
-
-			// Reuse TempImage only for the max-area downscale (memory safety) and
-			// mime conversion. minImageSide is 1 on purpose: a face crop is meant
-			// to be small, so it must not be skipped for being "too small".
-			$tempImage = new TempImage(
-				$crop['path'],
-				$model->getPreferredMimeType(),
-				$model->getMaximumArea(),
-				1
-			);
-
-			$rawFaces = $model->detectFaces($tempImage->getTempPath());
-			$ratio = $tempImage->getRatio();
-			$tempImage->clean();
-
-			if (count($rawFaces) === 0) {
-				$this->logInfo('Manual face ' . $faceId . ': no face detected in the marked region, excluding it from clustering');
-				$this->faceMapper->markManualFaceNotGroupable($faceId);
-				return;
-			}
-
-			$best = $this->pickLargestFace($rawFaces);
+			$best = $this->pickLargestFace($faces);
 			if (empty($best['descriptor'])) {
-				$this->faceMapper->markManualFaceNotGroupable($faceId);
+				$this->log('Manual face ' . $faceId . ': the face detected in the marked region has no descriptor, excluding it from clustering');
+				$this->giveUp($faceId);
 				return;
 			}
 
-			// Replace the user rectangle with the box the descriptor was actually
-			// computed from. The detected box is in downscaled-crop space, so it is
-			// scaled back up (ratio) and shifted by the crop offset into original
-			// image pixels. Without this the frontend would keep showing the user's
-			// rectangle while the descriptor belongs to a different face found inside
-			// the margin (e.g. the user marked a back and a bystander's face sits in
-			// the margin); box and descriptor would then describe different faces.
-			$box = $this->toOriginalBox($best, $ratio, $crop['offsetX'], $crop['offsetY']);
+			// The box is replaced with the one the descriptor was actually
+			// computed from. Without this the frontend would keep showing the
+			// user's rectangle while the descriptor belongs to a different face
+			// found inside the margin (e.g. the user marked a back and a
+			// bystander's face sits in the margin); box and descriptor would
+			// then describe different faces. When the two do not even overlap
+			// like two finds of the same face, the user is told the box moved.
+			$boxAdjusted = FaceRect::overlapPercent(ManualFaceDetector::edges($drawn), ManualFaceDetector::edges($best))
+				< FaceRect::SAME_FACE_MIN_OVERLAP;
 
 			$this->faceMapper->setManualFaceDescriptor(
 				$faceId, $best['descriptor'],
-				$box['x'], $box['y'], $box['width'], $box['height']
+				$best['x'], $best['y'], $best['width'], $best['height'],
+				$best['confidence'], $boxAdjusted
 			);
-			$this->logInfo('Manual face ' . $faceId . ': descriptor computed, it will be used for clustering');
-		} catch (\Exception $e) {
+			$this->log('Manual face ' . $faceId . ': descriptor computed with a confidence of ' . $best['confidence']);
+		} catch (\Throwable $e) {
 			// Robustness: a single unreadable/odd region must never crash the job.
-			$this->logInfo('Manual face ' . $faceId . ': could not compute a descriptor (' . $e->getMessage() . '), excluding it from clustering');
+			$this->log('Manual face ' . $faceId . ' on file ' . $row['file'] . ' of user ' . $userId . ': could not compute a descriptor (' . $e->getMessage() . '), excluding it from clustering');
 			$this->logDebug((string) $e);
-			$this->faceMapper->markManualFaceNotGroupable($faceId);
+			$this->giveUp($faceId);
 		} finally {
 			// Clean up any temporary files (crop + external file copies).
-			$this->tempManager->clean();
-			$this->fileService->clean();
+			try {
+				$this->detector->clean();
+			} catch (\Throwable $e) {
+				$this->log('Manual face ' . $faceId . ': could not remove the temporary files (' . $e->getMessage() . ')');
+			}
 		}
 	}
 
 	/**
-	 * Crop the marked region (plus a margin) from the original image and save it
-	 * to a temporary file. Coordinates are original-image pixels in the oriented
-	 * frame, so the image is orientation-fixed before cropping.
-	 *
-	 * The crop offset is returned alongside the path so detections made on the
-	 * crop can be mapped back to original-image pixels.
-	 *
-	 * @return array{path: string, offsetX: int, offsetY: int}|null the cropped
-	 *         temp file and its top-left offset, or null on failure
+	 * Records that the search found nothing in the marked region, so that the
+	 * face is not taken again on every run. If even that fails, it is left
+	 * pending for the next one, and the other faces are still searched.
 	 */
-	private function cropRegion(string $localPath, string $mimeType, int $x, int $y, int $w, int $h): ?array {
-		// The same loader the analysis uses, so that a face marked on a HEIC or
-		// an AVIF is cropped from the same image the model saw. No maximum area
-		// is imposed here: the rectangle is in pixels of the original image, and
-		// a downscale would put the crop somewhere else.
-		$image = ImageUtil::loadFromPath($localPath, true, null);
-		if (is_null($image)) {
-			return null;
+	private function giveUp(int $faceId): void {
+		try {
+			$this->faceMapper->markManualFaceNotGroupable($faceId);
+		} catch (\Throwable $e) {
+			$this->log('Manual face ' . $faceId . ': could not record that it has no face either (' . $e->getMessage() . '), it is left for the next run');
+			$this->logDebug((string) $e);
 		}
-
-		$imgW = $image->width();
-		$imgH = $image->height();
-		if ($imgW <= 0 || $imgH <= 0 || $w <= 0 || $h <= 0) {
-			return null;
-		}
-
-		$marginX = (int) round($w * self::CROP_MARGIN);
-		$marginY = (int) round($h * self::CROP_MARGIN);
-
-		$cropX = max(0, $x - $marginX);
-		$cropY = max(0, $y - $marginY);
-		$cropRight = min($imgW, $x + $w + $marginX);
-		$cropBottom = min($imgH, $y + $h + $marginY);
-
-		$cropW = $cropRight - $cropX;
-		$cropH = $cropBottom - $cropY;
-		if ($cropW <= 0 || $cropH <= 0) {
-			return null;
-		}
-
-		if ($image->crop($cropX, $cropY, $cropW, $cropH) === false) {
-			return null;
-		}
-
-		$cropPath = $this->tempManager->getTemporaryFile();
-		if ($image->save($cropPath, $mimeType) === false) {
-			return null;
-		}
-
-		return [
-			'path'    => $cropPath,
-			'offsetX' => $cropX,
-			'offsetY' => $cropY,
-		];
-	}
-
-	/**
-	 * Map a face detected on the crop back to original-image pixels. The detector
-	 * runs on the (possibly downscaled) crop, so coordinates are scaled by the
-	 * TempImage ratio and shifted by the crop offset, mirroring the normalization
-	 * done for full-image detections.
-	 *
-	 * @param array<string, mixed> $rawFace detection with left/top/right/bottom
-	 * @return array{x: int, y: int, width: int, height: int}
-	 */
-	private function toOriginalBox(array $rawFace, float $ratio, int $offsetX, int $offsetY): array {
-		$left   = (int) round(((int) $rawFace['left'])   * $ratio) + $offsetX;
-		$top    = (int) round(((int) $rawFace['top'])    * $ratio) + $offsetY;
-		$right  = (int) round(((int) $rawFace['right'])  * $ratio) + $offsetX;
-		$bottom = (int) round(((int) $rawFace['bottom']) * $ratio) + $offsetY;
-
-		return [
-			'x'      => $left,
-			'y'      => $top,
-			'width'  => max(1, $right - $left),
-			'height' => max(1, $bottom - $top),
-		];
 	}
 
 	/**
 	 * Pick the largest detected face (by bounding-box area) from a detection
 	 * result, assuming the user centred the rectangle on the intended face.
 	 *
-	 * @param array<int, array<string, mixed>> $rawFaces
+	 * @param array<int, array<string, mixed>> $faces faces in pixels of the original photo
 	 * @return array<string, mixed> the best face, or [] if none
 	 */
-	private function pickLargestFace(array $rawFaces): array {
+	private function pickLargestFace(array $faces): array {
 		$best = [];
 		$bestArea = -1;
-		foreach ($rawFaces as $face) {
-			$width = max(0, (int) $face['right'] - (int) $face['left']);
-			$height = max(0, (int) $face['bottom'] - (int) $face['top']);
-			$area = $width * $height;
+		foreach ($faces as $face) {
+			$area = $face['width'] * $face['height'];
 			if ($area > $bestArea) {
 				$bestArea = $area;
 				$best = $face;
 			}
 		}
 		return $best;
+	}
+
+	private function log(string $message): void {
+		$this->logInfo(ManualFaceDetector::LOG_PREFIX . $message);
 	}
 }

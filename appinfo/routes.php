@@ -207,16 +207,16 @@ return ['routes' =>
 		'url'  => '/api/2.0/file/{fileId}/faces',
 		'verb' => 'GET'
 	],
-	// Add a manually drawn face and attach it to a named person cluster
+	// Add a manually drawn face, attached to a named person cluster or left for the clustering
 	[
 		'name' => 'Api#addManualFace',
 		'url'  => '/api/2.0/face/manual',
 		'verb' => 'POST'
 	],
-	// Reassign a single detected face to a different person cluster (per-photo fix)
+	// Queue a region of a photo to be searched for faces again by the background job
 	[
-		'name' => 'Api#reassignFace',
-		'url'  => '/api/2.0/face/{faceId}/reassign',
+		'name' => 'Api#addManualRegion',
+		'url'  => '/api/2.0/face/region',
 		'verb' => 'POST'
 	],
 

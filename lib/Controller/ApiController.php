@@ -39,10 +39,17 @@ use OCA\FaceRecognition\Db\ImageMapper;
 
 use OCA\FaceRecognition\Db\Person;
 use OCA\FaceRecognition\Db\ClusterMapper;
+use OCA\FaceRecognition\Db\ManualRegion;
+use OCA\FaceRecognition\Db\ManualRegionMapper;
 use OCA\FaceRecognition\Db\PersonMapper;
+
+use OCA\FaceRecognition\Helper\FaceParticipation;
+use OCA\FaceRecognition\Helper\ManualFaceDetector;
 
 use OCA\FaceRecognition\Service\SettingsService;
 use OCA\FaceRecognition\Service\UrlService;
+
+use Psr\Log\LoggerInterface;
 
 class ApiController extends NcApiController {
 
@@ -64,6 +71,12 @@ class ApiController extends NcApiController {
 	/** @var UrlService */
 	private $urlService;
 
+	/** @var ManualRegionMapper */
+	private $manualRegionMapper;
+
+	/** @var LoggerInterface */
+	private $logger;
+
 	/** @var string */
 	private $userId;
 
@@ -76,6 +89,8 @@ ClusterMapper   $clusterMapper,
 	                            PersonMapper    $personmapper,
 		SettingsService $settingsService,
 		UrlService      $urlService,
+		ManualRegionMapper $manualRegionMapper,
+		LoggerInterface $logger,
 		$UserId)
 	{
 		parent::__construct($AppName, $request);
@@ -86,6 +101,8 @@ $this->clusterMapper  = $clusterMapper;
 		$this->personMapper    = $personmapper;
 		$this->settingsService = $settingsService;
 		$this->urlService      = $urlService;
+		$this->manualRegionMapper = $manualRegionMapper;
+		$this->logger          = $logger;
 		$this->userId          = $UserId;
 	}
 
@@ -425,14 +442,23 @@ $this->clusterMapper  = $clusterMapper;
 		if (!$this->settingsService->getUserEnabled($this->userId))
 			return new JSONResponse([], Http::STATUS_PRECONDITION_FAILED);
 
+		// The face comes from the request: it has to be one of this user's
+		// before anything is written, and it has to be in a cluster to be
+		// taken out of one.
 		$face = $this->faceMapper->find($faceId);
+		if (is_null($face))
+			return new JSONResponse([], Http::STATUS_NOT_FOUND);
+		if (is_null($this->imageMapper->find($this->userId, $face->getImage())))
+			return new JSONResponse([], Http::STATUS_FORBIDDEN);
+		if (is_null($face->getCluster()))
+			return new JSONResponse(['error' => 'the face is not in a cluster'], Http::STATUS_CONFLICT);
 
 		$personId = null;
 		if (!is_null($name) && $name !== '') {
 			$personId = $this->personMapper->findOrCreateByName($this->userId, $name)->getId();
 		}
 
-		$cluster = $this->clusterMapper->detachFace($face->getCluster(), $faceId, $personId);
+		$cluster = $this->clusterMapper->detachFace((int) $face->getCluster(), $faceId, $personId);
 
 		return new JSONResponse($cluster, Http::STATUS_OK);
 	}
@@ -456,7 +482,14 @@ $this->clusterMapper  = $clusterMapper;
 
 	/**
 	 * The faces of one file, so that a client can draw the boxes that are
-	 * already there before the user adds one by hand.
+	 * already there before the user adds one by hand, together with what the
+	 * user needs to understand them: where each face came from, whether it
+	 * takes part in the clustering and why not, and how big its group is. The
+	 * regions of the file that were queued for a search come along, and the
+	 * minimums the clustering applies, which hold for the whole file.
+	 *
+	 * Whatever cannot be found out is left null and logged, instead of failing
+	 * the whole answer: the faces are what the client needs above all.
 	 *
 	 * @NoAdminRequired
 	 * @CORS
@@ -471,35 +504,152 @@ $this->clusterMapper  = $clusterMapper;
 		$modelId = $this->settingsService->getCurrentFaceModel();
 		$faces = $this->faceMapper->findFromFile($this->userId, $modelId, $fileId);
 
+		$limits = [
+			'minFaceSize'   => $this->settingsService->getMinimumFaceSize(),
+			'minConfidence' => $this->settingsService->getMinimumConfidence(),
+		];
+
+		// The groups of all the faces at once, so that the number of queries
+		// does not grow with the number of faces on the photo.
+		$clusterIds = [];
+		foreach ($faces as $face) {
+			if (!is_null($face->getCluster())) {
+				$clusterIds[] = (int) $face->getCluster();
+			}
+		}
+		$clusterSizes = $this->unlessFailing('the size of the groups of file ' . $fileId,
+			function () use ($clusterIds): array {
+				return $this->faceMapper->countFacesInClusters($clusterIds);
+			});
+		$names = $this->unlessFailing('the names of the groups of file ' . $fileId,
+			function () use ($clusterIds): array {
+				return $this->clusterMapper->findPersonNames($this->userId, $clusterIds);
+			});
+
+		$withState = $this->faceMapper->hasManualStateColumn();
+
 		$resp = [];
 		foreach ($faces as $face) {
-			$resp[] = [
-				'id'         => $face->getId(),
-				'x'          => $face->getX(),
-				'y'          => $face->getY(),
-				'width'      => $face->getWidth(),
-				'height'     => $face->getHeight(),
-				'cluster'    => $face->getCluster(),
-				'personName' => $this->nameOfCluster($face->getCluster()),
-				'isManual'   => (bool) $face->getIsManual(),
-			];
+			$resp[] = $this->describeFace($face, $withState, $clusterSizes, $names, $limits);
 		}
 
-		return new JSONResponse($resp, Http::STATUS_OK);
+		return new JSONResponse([
+			'faces'   => $resp,
+			'regions' => $this->regionsOfFile($modelId, $fileId),
+			'limits'  => $limits,
+		], Http::STATUS_OK);
 	}
 
 	/**
-	 * Adds a face the user drew on a photo and says who it is.
+	 * One face as getFacesForFile() gives it.
+	 *
+	 * @param array<int, int>|null $clusterSizes [clusterId => faces], null when unknown
+	 * @param array<int, string|null>|null $names [clusterId => name], null when unknown
+	 * @param array{minFaceSize: int, minConfidence: float} $limits
+	 */
+	private function describeFace(Face $face, bool $withState, ?array $clusterSizes, ?array $names, array $limits): array {
+		$cluster = $face->getCluster();
+
+		$described = [
+			'id'             => $face->getId(),
+			'x'              => (int) $face->getX(),
+			'y'              => (int) $face->getY(),
+			'width'          => (int) $face->getWidth(),
+			'height'         => (int) $face->getHeight(),
+			'cluster'        => $cluster,
+			'personName'     => is_null($cluster) || is_null($names) ? null : ($names[(int) $cluster] ?? null),
+			'isManual'       => (bool) $face->getIsManual(),
+			'confidence'     => (float) $face->getConfidence(),
+			'manualState'    => null,
+			'boxAdjusted'    => null,
+			'origin'         => null,
+			'clustering'     => null,
+			'excludedReason' => null,
+			// Null without a group, and null as well when the group is there but
+			// its size could not be found out.
+			'clusterSize'    => is_null($cluster) || is_null($clusterSizes) ? null : ($clusterSizes[(int) $cluster] ?? null),
+		];
+
+		// Before the migration ran there is no state to derive anything from,
+		// and the face goes out as it did before.
+		if (!$withState) {
+			return $described;
+		}
+
+		$state = $face->getManualState();
+		$participation = FaceParticipation::derive($state, $face->getIsGroupable(),
+			(int) $face->getWidth(), (int) $face->getHeight(), (float) $face->getConfidence(),
+			$limits['minFaceSize'], $limits['minConfidence']);
+
+		$described['manualState'] = $state;
+		$described['boxAdjusted'] = (bool) $face->getBoxAdjusted();
+		$described['origin'] = FaceParticipation::origin($state);
+		$described['clustering'] = $participation['clustering'];
+		$described['excludedReason'] = $participation['excludedReason'];
+
+		return $described;
+	}
+
+	/**
+	 * The regions of a file queued for a search, whatever their state. Null
+	 * when they cannot be known, which tells the client to not offer the
+	 * search of a region either.
+	 */
+	private function regionsOfFile(int $modelId, int $fileId): ?array {
+		if (!$this->manualRegionMapper->isAvailable()) {
+			return null;
+		}
+
+		return $this->unlessFailing('the regions of file ' . $fileId,
+			function () use ($modelId, $fileId): array {
+				$image = $this->imageMapper->findFromFile($this->userId, $modelId, $fileId);
+				if (is_null($image)) {
+					return [];
+				}
+				return array_map(function (ManualRegion $region): array {
+					return $region->jsonSerialize();
+				}, $this->manualRegionMapper->findByImage($image->getId()));
+			});
+	}
+
+	/**
+	 * Runs $what, and logs and gives null if it fails, for the parts of an
+	 * answer that are not worth failing the whole answer for.
+	 *
+	 * @return mixed|null
+	 */
+	private function unlessFailing(string $description, callable $what) {
+		try {
+			return $what();
+		} catch (\Throwable $e) {
+			$this->logger->error(ManualFaceDetector::LOG_PREFIX . 'Could not find out ' . $description . ' of user ' . $this->userId . ': ' . $e->getMessage(), [
+				'app' => 'facerecognition',
+				'exception' => $e,
+			]);
+			return null;
+		}
+	}
+
+	/**
+	 * Adds a face the user drew on a photo, and says who it is if the user
+	 * gave a name.
 	 *
 	 * The rectangle comes as fractions (0..1) of the photo, and imageWidth and
 	 * imageHeight are its natural pixel size, so that the face is stored in the
 	 * same pixel coordinates as the ones the model finds.
 	 *
-	 * The face gets a cluster of its own, pointing at the person the user
-	 * named. That is what the data model is for: a person has as many clusters
-	 * as different ways their face was found, and one more of them costs
-	 * nothing. It also keeps the face out of the clusters the analysis built,
-	 * so a hand drawn box never becomes the reason another face joins them.
+	 * With a name, the face gets a cluster of its own, pointing at the person
+	 * the user named. That is what the data model is for: a person has as many
+	 * clusters as different ways their face was found, and one more of them
+	 * costs nothing. Without a name it gets no cluster and no person, and the
+	 * clustering places it like any other face, in the cluster of the person
+	 * it looks like if there is one.
+	 *
+	 * Either way ManualFaceDescriptorTask searches the marked region for a
+	 * face, and takes its descriptor and its confidence if it finds one. Until
+	 * then the face has no confidence to speak of, and it is stored with none
+	 * rather than with an invented one: the clustering leaves it alone while it
+	 * waits, because it is pending, and not because of any value put here.
 	 *
 	 * @NoAdminRequired
 	 * @CORS
@@ -508,35 +658,21 @@ $this->clusterMapper  = $clusterMapper;
 	 * @return JSONResponse
 	 */
 	public function addManualFace(
-		int    $fileId,
-		string $personName,
-		float  $x,
-		float  $y,
-		float  $width,
-		float  $height,
-		int    $imageWidth,
-		int    $imageHeight,
-		bool   $useForClustering = false
+		int     $fileId,
+		?string $personName,
+		float   $x,
+		float   $y,
+		float   $width,
+		float   $height,
+		int     $imageWidth,
+		int     $imageHeight
 	): JSONResponse {
 		if (!$this->settingsService->getUserEnabled($this->userId))
 			return new JSONResponse([], Http::STATUS_PRECONDITION_FAILED);
 
-		if (trim($personName) === '')
-			return new JSONResponse(['error' => 'personName must not be empty'], Http::STATUS_BAD_REQUEST);
-		if ($imageWidth <= 0 || $imageHeight <= 0)
-			return new JSONResponse(['error' => 'invalid image dimensions'], Http::STATUS_BAD_REQUEST);
-		if ($x < 0 || $y < 0 || $width <= 0 || $height <= 0 ||
-		    ($x + $width) > 1.0001 || ($y + $height) > 1.0001)
-			return new JSONResponse(['error' => 'invalid rectangle'], Http::STATUS_BAD_REQUEST);
-
-		// Turn the fractional rectangle into pixels of the original image, and
-		// refuse the ones that round down to no area at all.
-		$pxX      = (int) round($x * $imageWidth);
-		$pxY      = (int) round($y * $imageHeight);
-		$pxWidth  = (int) round($width * $imageWidth);
-		$pxHeight = (int) round($height * $imageHeight);
-		if ($pxWidth < 1 || $pxHeight < 1)
-			return new JSONResponse(['error' => 'rectangle too small'], Http::STATUS_BAD_REQUEST);
+		$rect = $this->pixelRectOf($x, $y, $width, $height, $imageWidth, $imageHeight);
+		if ($rect instanceof JSONResponse)
+			return $rect;
 
 		// The file has to exist and be one of this user's. getFileNode() looks
 		// it up in their own storage, so an id of somebody else, or one that is
@@ -544,9 +680,125 @@ $this->clusterMapper  = $clusterMapper;
 		if ($this->urlService->getFileNode($fileId) === null)
 			return new JSONResponse(['error' => 'file not found or not accessible'], Http::STATUS_NOT_FOUND);
 
-		$modelId = $this->settingsService->getCurrentFaceModel();
+		if (!$this->faceMapper->hasManualStateColumn())
+			return $this->notMigrated('manual faces');
 
-		// A face needs an image row, and the file may never have been analyzed.
+		$modelId = $this->settingsService->getCurrentFaceModel();
+		$image = $this->imageOfFile($modelId, $fileId);
+
+		$name = trim($personName ?? '');
+		$person = null;
+		$clusterId = null;
+		if ($name !== '') {
+			$person = $this->personMapper->findOrCreateByName($this->userId, $name);
+			$clusterId = $this->clusterMapper->create($this->userId, $modelId);
+			$this->clusterMapper->setPerson($clusterId, $person->getId());
+		}
+
+		$face = new Face();
+		$face->setImage($image->getId());
+		$face->cluster = $clusterId;
+		$face->setX($rect['x']);
+		$face->setY($rect['y']);
+		$face->setWidth($rect['width']);
+		$face->setHeight($rect['height']);
+		$face->setConfidence(0.0);
+		$face->landmarks = [];
+		$face->descriptor = [];
+		$face->isGroupable = true;
+		$face->isManual = true;
+		$face->manualState = Face::MANUAL_STATE_PENDING;
+		$face->setCreationTime(new \DateTime());
+
+		$face = $this->faceMapper->insertManualFace($face);
+
+		return new JSONResponse([
+			'faceId'      => $face->getId(),
+			'clusterId'   => $clusterId,
+			'personId'    => is_null($person) ? null : $person->getId(),
+			'name'        => is_null($person) ? null : $person->getName(),
+			'manualState' => $face->manualState,
+		], Http::STATUS_OK);
+	}
+
+	/**
+	 * Queues a region of a photo to be searched for faces again, by the next
+	 * run of the background job. The model runs there and never in a request.
+	 *
+	 * It takes the rectangle like addManualFace(), without a name: what the
+	 * search finds is left for the clustering to place.
+	 *
+	 * @NoAdminRequired
+	 * @CORS
+	 * @NoCSRFRequired
+	 *
+	 * @return JSONResponse
+	 */
+	public function addManualRegion(
+		int   $fileId,
+		float $x,
+		float $y,
+		float $width,
+		float $height,
+		int   $imageWidth,
+		int   $imageHeight
+	): JSONResponse {
+		if (!$this->settingsService->getUserEnabled($this->userId))
+			return new JSONResponse([], Http::STATUS_PRECONDITION_FAILED);
+
+		$rect = $this->pixelRectOf($x, $y, $width, $height, $imageWidth, $imageHeight);
+		if ($rect instanceof JSONResponse)
+			return $rect;
+
+		if ($this->urlService->getFileNode($fileId) === null)
+			return new JSONResponse(['error' => 'file not found or not accessible'], Http::STATUS_NOT_FOUND);
+
+		if (!$this->manualRegionMapper->isAvailable() || !$this->faceMapper->hasManualStateColumn())
+			return $this->notMigrated('the search of regions');
+
+		$modelId = $this->settingsService->getCurrentFaceModel();
+		$image = $this->imageOfFile($modelId, $fileId);
+
+		$region = $this->manualRegionMapper->enqueue($image->getId(),
+			$rect['x'], $rect['y'], $rect['width'], $rect['height']);
+
+		return new JSONResponse([
+			'regionId' => $region->getId(),
+			'state'    => $region->getState(),
+		], Http::STATUS_OK);
+	}
+
+	/**
+	 * The rectangle of a request, given as fractions (0..1) of the photo, in
+	 * pixels of the original image; or the response that refuses it, when it
+	 * is not inside the photo or rounds down to no area at all.
+	 *
+	 * @return array{x: int, y: int, width: int, height: int}|JSONResponse
+	 */
+	private function pixelRectOf(float $x, float $y, float $width, float $height, int $imageWidth, int $imageHeight) {
+		if ($imageWidth <= 0 || $imageHeight <= 0)
+			return new JSONResponse(['error' => 'invalid image dimensions'], Http::STATUS_BAD_REQUEST);
+		if ($x < 0 || $y < 0 || $width <= 0 || $height <= 0 ||
+		    ($x + $width) > 1.0001 || ($y + $height) > 1.0001)
+			return new JSONResponse(['error' => 'invalid rectangle'], Http::STATUS_BAD_REQUEST);
+
+		$rect = [
+			'x'      => (int) round($x * $imageWidth),
+			'y'      => (int) round($y * $imageHeight),
+			'width'  => (int) round($width * $imageWidth),
+			'height' => (int) round($height * $imageHeight),
+		];
+		if ($rect['width'] < 1 || $rect['height'] < 1)
+			return new JSONResponse(['error' => 'rectangle too small'], Http::STATUS_BAD_REQUEST);
+
+		return $rect;
+	}
+
+	/**
+	 * The image row of a file, created if the file was never analyzed: a face
+	 * and a region both need one.
+	 */
+	private function imageOfFile(int $modelId, int $fileId): Image {
 		$image = $this->imageMapper->findFromFile($this->userId, $modelId, $fileId);
 		if ($image === null) {
 			$image = new Image();
@@ -556,122 +808,18 @@ $this->clusterMapper  = $clusterMapper;
 			$image->setIsProcessed(false);
 			$image = $this->imageMapper->insert($image);
 		}
-
-		$person = $this->personMapper->findOrCreateByName($this->userId, $personName);
-
-		$clusterId = $this->clusterMapper->create($this->userId, $modelId);
-		$this->clusterMapper->setPerson($clusterId, $person->getId());
-
-		$face = new Face();
-		$face->setImage($image->getId());
-		$face->setCluster($clusterId);
-		$face->setX($pxX);
-		$face->setY($pxY);
-		$face->setWidth($pxWidth);
-		$face->setHeight($pxHeight);
-		$face->setConfidence(1.0);
-		$face->landmarks = [];
-		$face->descriptor = [];
-		$face->isGroupable = $useForClustering;
-		$face->isManual = true;
-		$face->setCreationTime(new \DateTime());
-
-		$face = $this->faceMapper->insertManualFace($face);
-
-		// When the user asked for the face to be used for recognition it is
-		// stored groupable but without a descriptor, so it takes no part in the
-		// clustering yet. ManualFaceDescriptorTask crops the marked region, and
-		// if it finds a face there it computes the descriptor. From then on the
-		// face is a sample of its cluster like any other, and faces that look
-		// alike join the person the user named.
-		return new JSONResponse([
-			'faceId'           => $face->getId(),
-			'clusterId'        => $clusterId,
-			'personId'         => $person->getId(),
-			'name'             => $person->getName(),
-			'clusteringQueued' => $useForClustering,
-		], Http::STATUS_OK);
+		return $image;
 	}
 
 	/**
-	 * Says who one already detected face is, without touching the other faces
-	 * of its cluster.
-	 *
-	 * The face is taken out of its cluster and put in one of the person the
-	 * user named, which is what detachFace() does, and it is marked as manual
-	 * so that analyzing the file again does not delete it and undo the change.
-	 *
-	 * @NoAdminRequired
-	 * @CORS
-	 * @NoCSRFRequired
-	 *
-	 * @return JSONResponse
+	 * The answer while the migration that adds what a feature needs did not
+	 * run yet.
 	 */
-	public function reassignFace(int $faceId, string $personName): JSONResponse {
-		if (!$this->settingsService->getUserEnabled($this->userId))
-			return new JSONResponse([], Http::STATUS_PRECONDITION_FAILED);
-
-		if (trim($personName) === '')
-			return new JSONResponse(['error' => 'personName must not be empty'], Http::STATUS_BAD_REQUEST);
-
-		$face = $this->faceMapper->find($faceId);
-		if ($face === null)
-			return new JSONResponse(['error' => 'face not found'], Http::STATUS_NOT_FOUND);
-
-		// The image of the face has to be one of this user's.
-		$image = $this->imageMapper->find($this->userId, $face->getImage());
-		if ($image === null)
-			return new JSONResponse([], Http::STATUS_FORBIDDEN);
-
-		$modelId = $this->settingsService->getCurrentFaceModel();
-		$person = $this->personMapper->findOrCreateByName($this->userId, $personName);
-
-		// The cluster is null while the clustering has not reached this face yet,
-		// and no id is ever zero, so this is the one case with nothing to detach
-		// the face from.
-		$currentCluster = (int) $face->getCluster();
-		if ($currentCluster === 0) {
-			$clusterId = $this->clusterMapper->create($this->userId, $modelId);
-			$this->clusterMapper->setPerson($clusterId, $person->getId());
-			$this->clusterMapper->attachFaces([$faceId], $clusterId);
-		} else {
-			$clusterId = $this->clusterMapper
-				->detachFace($currentCluster, $faceId, $person->getId())
-				->getId();
-		}
-
-		$this->faceMapper->markFaceManual($faceId);
-
-		return new JSONResponse([
-			'faceId'    => $faceId,
-			'clusterId' => $clusterId,
-			'personId'  => $person->getId(),
-			'name'      => $person->getName(),
-		], Http::STATUS_OK);
-	}
-
-	/**
-	 * The name the user gave the cluster, if they gave it one.
-	 *
-	 * @param int|null $clusterId
-	 */
-	private function nameOfCluster($clusterId): ?string {
-		if (is_null($clusterId)) {
-			return null;
-		}
-
-		try {
-			$cluster = $this->clusterMapper->findById((int) $clusterId);
-			$personId = $cluster->getPerson();
-			if (is_null($personId)) {
-				return null;
-			}
-
-			return $this->personMapper->find($this->userId, (int) $personId)->getName();
-		} catch (\Exception $e) {
-			// The cluster or the person is gone, so there is no name to give.
-			return null;
-		}
+	private function notMigrated(string $feature): JSONResponse {
+		$this->logger->warning(ManualFaceDetector::LOG_PREFIX . ucfirst($feature) . ' are not available until the database migration of the app ran', [
+			'app' => 'facerecognition',
+		]);
+		return new JSONResponse(['error' => $feature . ' are not available until the app is upgraded'], Http::STATUS_SERVICE_UNAVAILABLE);
 	}
 
 }
