@@ -76,13 +76,30 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 	public function testABoxThatMovedIsRecorded() {
 		$this->migratedWith([self::pending(7)]);
 		$this->everyFileExists();
+		// A face in the upper left corner, that only touches the drawn box
+		// with a corner of 20 x 20 pixels.
+		$this->modelFinds([self::rawFace(0, 0, 40, 40, 1.02)]);
+
+		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
+			->with(7, $this->anything(), 20, 20, 40, 40, 1.02, true);
+
+		$this->run($this->task());
+	}
+
+	/**
+	 * A face that is only in the margin, and does not touch the drawn box, is
+	 * someone else's: its descriptor is not taken for the marking.
+	 */
+	public function testAFaceOnlyInTheMarginIsNotTaken() {
+		$this->migratedWith([self::pending(7)]);
+		$this->everyFileExists();
 		// A face in the upper left corner of the margin, nowhere near the box.
 		$this->modelFinds([self::rawFace(0, 0, 18, 18, 1.02)]);
 
-		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
-			->with(7, $this->anything(), 20, 20, 18, 18, 1.02, true);
+		$this->faceMapper->expects($this->never())->method('setManualFaceDescriptor');
+		$this->faceMapper->expects($this->once())->method('markManualFaceNotGroupable')->with(7);
 
-		$this->run($this->task());
+		$this->assertTrue($this->run($this->task()));
 	}
 
 	/**
@@ -101,18 +118,21 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 	}
 
 	/**
-	 * Of several faces in the crop, the biggest one is taken.
+	 * Of several faces in the crop, the one on the drawn box is taken, even
+	 * when a bigger one reaches into it from the margin.
 	 */
-	public function testTheBiggestFaceIsTaken() {
+	public function testTheFaceOnTheDrawnBoxIsTakenAndNotTheBiggest() {
 		$this->migratedWith([self::pending(7)]);
 		$this->everyFileExists();
 		$this->modelFinds([
-			self::rawFace(0, 0, 10, 10, 1.1),
-			self::rawFace(20, 20, 70, 70, 1.0),
+			// 45 x 45 at 65,65 of the photo: bigger, but mostly in the margin.
+			self::rawFace(45, 45, 90, 90, 1.1),
+			// 36 x 36 at 44,44 of the photo: inside the drawn box.
+			self::rawFace(24, 24, 60, 60, 1.0),
 		]);
 
 		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
-			->with(7, $this->anything(), 40, 40, 50, 50, 1.0, false);
+			->with(7, $this->anything(), 44, 44, 36, 36, 1.0, false);
 
 		$this->run($this->task());
 	}

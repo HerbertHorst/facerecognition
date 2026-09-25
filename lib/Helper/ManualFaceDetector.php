@@ -28,17 +28,22 @@ use OCA\FaceRecognition\Service\FileService;
 
 /**
  * Searches a region of a photo the user marked for faces: cuts the region, with
- * a margin, out of the original photo, scales it to what the model can take,
- * runs the detector on it, and gives the faces back in pixels of the original
+ * a margin, out of the original photo, scales it (see analysisArea()), runs
+ * the detector on it, and gives the faces back in pixels of the original
  * photo.
  *
  * Why a crop helps even though the full photo was already analysed: the full
  * photo is downscaled to the model's maximum area before detection, so a small
  * face can fall below the detector's size threshold and be missed. The crop is
- * scaled to that same area, which for a region smaller than it means scaled
- * up, so the same face is large enough to be detected, and its descriptor is
- * comparable to descriptors from full-image detections (dlib aligns the face
- * before computing it).
+ * not downscaled as far, or even scaled up, so the same face is large enough
+ * to be detected, and its descriptor is comparable to descriptors from
+ * full-image detections (dlib aligns the face before computing it).
+ *
+ * Scaling up only helps the detector: the descriptor is computed from a chip
+ * of 150 x 150 pixels, and a face of 40 pixels holds what 40 pixels hold, at
+ * any scale. So the crop is scaled up no more than the detector needs, which
+ * keeps the search fast and adds no interpolated detail the detector could
+ * take for a face.
  *
  * A face drawn by hand and a region to search again both go through here, so
  * that orientation, mime type and the way back to the coordinates of the photo
@@ -51,6 +56,21 @@ class ManualFaceDetector {
 	 * so that they can be told apart from the ones of the rest of the app.
 	 */
 	public const LOG_PREFIX = '[manual faces] ';
+
+	/**
+	 * The most a crop is scaled up. The detectors of dlib look for faces of
+	 * about 80 pixels and more, so a face of the minimum size of 40 pixels is
+	 * found at twice its size already; four times leaves room for a smaller
+	 * drawn box. Anything beyond that is interpolation.
+	 */
+	public const MAX_UPSCALE = 4.0;
+
+	/**
+	 * Side a marked face is scaled up to, when its size is known: well above
+	 * what the detector needs, and above the 150 pixels of the chip the
+	 * descriptor is computed from.
+	 */
+	public const TARGET_FACE_SIDE = 200;
 
 	/** @var FileService */
 	private $fileService;
@@ -69,12 +89,13 @@ class ManualFaceDetector {
 	 * pixels, in the frame the photo is shown in, after its orientation.
 	 *
 	 * @param array{x: int, y: int, width: int, height: int} $rect
+	 * @param int|null $faceSide expected side of the face, in pixels of the photo, if the region is one face
 	 *
 	 * @return array<int, array{x: int, y: int, width: int, height: int, confidence: float, landmarks: array, descriptor: array}>
 	 *
 	 * @throws \RuntimeException if the photo cannot be read, or the region is not on it
 	 */
-	public function detect(IModel $model, string $userId, int $fileId, array $rect, int $marginX, int $marginY): array {
+	public function detect(IModel $model, string $userId, int $fileId, array $rect, int $marginX, int $marginY, ?int $faceSide = null): array {
 		$node = $this->fileService->getFileById($fileId, $userId);
 		if (!($node instanceof File)) {
 			throw new \RuntimeException('the file ' . $fileId . ' is not available');
@@ -87,13 +108,14 @@ class ManualFaceDetector {
 
 		$crop = $this->cropRegion($localPath, $model->getPreferredMimeType(), $rect, $marginX, $marginY);
 
-		// Reuse TempImage only for the max-area scale (memory safety) and mime
-		// conversion. minImageSide is 1 on purpose: a face crop is meant to be
-		// small, so it must not be skipped for being "too small".
+		// Reuse TempImage only for the scale and mime conversion. It scales to
+		// exactly the area it is given, so the area decides the factor.
+		// minImageSide is 1 on purpose: a face crop is meant to be small, so it
+		// must not be skipped for being "too small".
 		$tempImage = new TempImage(
 			$crop['path'],
 			$model->getPreferredMimeType(),
-			$model->getMaximumArea(),
+			self::analysisArea($crop['width'], $crop['height'], $model->getMaximumArea(), $faceSide),
 			1
 		);
 		try {
@@ -108,6 +130,24 @@ class ManualFaceDetector {
 			$faces[] = self::toOriginal($rawFace, $ratio, $crop['offsetX'], $crop['offsetY']);
 		}
 		return $faces;
+	}
+
+	/**
+	 * The area a crop is scaled to before the detector runs on it. TempImage
+	 * scales to exactly this area, so it sets the factor: never above the
+	 * maximum area of the model, which only ever shrinks a large region, and
+	 * never up by more than MAX_UPSCALE. When the region is a single face of
+	 * a known side, it is scaled up only until that face reaches
+	 * TARGET_FACE_SIDE, and a face already that big is not scaled up at all.
+	 */
+	public static function analysisArea(int $cropWidth, int $cropHeight, int $maxArea, ?int $faceSide = null): int {
+		$upscale = self::MAX_UPSCALE;
+		if (!is_null($faceSide) && $faceSide > 0) {
+			$upscale = min($upscale, max(1.0, self::TARGET_FACE_SIDE / $faceSide));
+		}
+
+		$area = (int) floor($cropWidth * $cropHeight * $upscale * $upscale);
+		return max(1, min($maxArea, $area));
 	}
 
 	/**
@@ -207,11 +247,12 @@ class ManualFaceDetector {
 	 * frame, so the image is orientation-fixed before cropping.
 	 *
 	 * The crop offset is returned alongside the path so detections made on the
-	 * crop can be mapped back to original-image pixels.
+	 * crop can be mapped back to original-image pixels, and its size so that
+	 * the scale can be chosen for it.
 	 *
 	 * @param array{x: int, y: int, width: int, height: int} $rect
 	 *
-	 * @return array{path: string, offsetX: int, offsetY: int}
+	 * @return array{path: string, offsetX: int, offsetY: int, width: int, height: int}
 	 *
 	 * @throws \RuntimeException if the photo cannot be loaded, or the region is not on it
 	 */
@@ -243,6 +284,8 @@ class ManualFaceDetector {
 			'path'    => $cropPath,
 			'offsetX' => $crop['x'],
 			'offsetY' => $crop['y'],
+			'width'   => $crop['width'],
+			'height'  => $crop['height'],
 		];
 	}
 }

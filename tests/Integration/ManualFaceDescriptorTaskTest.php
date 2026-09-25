@@ -20,6 +20,8 @@
  */
 namespace OCA\FaceRecognition\Tests\Integration;
 
+use OCA\FaceRecognition\BackgroundJob\Tasks\ManualFaceDescriptorTask;
+
 use OCA\FaceRecognition\Db\Face;
 use OCA\FaceRecognition\Db\FaceMapper;
 
@@ -125,21 +127,20 @@ class ManualFaceDescriptorTaskTest extends ManualFaceIntegrationTestCase {
 	}
 
 	/**
-	 * What the detector finds in the region of a marking, the biggest face,
-	 * as the task searches it.
+	 * What the detector finds in the region of a marking, the face on the
+	 * drawn box, as the task searches it: same margin, same scale.
 	 */
 	private function detectAgain(int $fileId, array $rect): array {
 		$model = $this->container->query(ModelManager::class)->getCurrentModel();
 		$model->open();
 		$detector = new ManualFaceDetector($this->container->query(FileService::class), $this->container->query('OCP\ITempManager'));
 		$faces = $detector->detect($model, $this->user->getUID(), $fileId, $rect,
-			(int) round($rect['width'] * 0.4), (int) round($rect['height'] * 0.4));
+			(int) round($rect['width'] * 0.4), (int) round($rect['height'] * 0.4),
+			min($rect['width'], $rect['height']));
 		$detector->clean();
 
-		$this->assertNotEmpty($faces);
-		usort($faces, function (array $a, array $b) {
-			return ($b['width'] * $b['height']) <=> ($a['width'] * $a['height']);
-		});
-		return $faces[0];
+		$face = ManualFaceDescriptorTask::pickMarkedFace($rect, $faces);
+		$this->assertNotNull($face);
+		return $face;
 	}
 }

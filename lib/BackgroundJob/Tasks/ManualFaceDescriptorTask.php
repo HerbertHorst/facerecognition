@@ -45,8 +45,9 @@ use OCA\FaceRecognition\Service\SettingsService;
  *
  * If a face is found, the marking takes its descriptor, its box and the
  * confidence the detector gave it, and from then on the clustering treats it
- * like any other face, minimums included. If no face can be detected in the
- * marked region, the face is simply excluded from clustering: it stays pinned
+ * like any other face, minimums included. If no face can be detected on the
+ * marked region, only in the margin around it, or none at all, the face is
+ * simply excluded from clustering: it stays pinned
  * to its person, if it has one. No fallback descriptor is fabricated.
  *
  * Nothing that goes wrong here leaves the task: the background job treats any
@@ -166,7 +167,8 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 		try {
 			$faces = $this->detector->detect($model, $userId, (int) $row['file'], $drawn,
 				(int) round($drawn['width'] * self::CROP_MARGIN),
-				(int) round($drawn['height'] * self::CROP_MARGIN));
+				(int) round($drawn['height'] * self::CROP_MARGIN),
+				min($drawn['width'], $drawn['height']));
 
 			if (count($faces) === 0) {
 				$this->log('Manual face ' . $faceId . ': no face detected in the marked region, excluding it from clustering');
@@ -174,7 +176,12 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 				return;
 			}
 
-			$best = $this->pickLargestFace($faces);
+			$best = self::pickMarkedFace($drawn, $faces);
+			if (is_null($best)) {
+				$this->log('Manual face ' . $faceId . ': the faces detected are all in the margin around the marked region, none on it, excluding it from clustering');
+				$this->giveUp($faceId);
+				return;
+			}
 			if (empty($best['descriptor'])) {
 				$this->log('Manual face ' . $faceId . ': the face detected in the marked region has no descriptor, excluding it from clustering');
 				$this->giveUp($faceId);
@@ -182,12 +189,11 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 			}
 
 			// The box is replaced with the one the descriptor was actually
-			// computed from. Without this the frontend would keep showing the
-			// user's rectangle while the descriptor belongs to a different face
-			// found inside the margin (e.g. the user marked a back and a
-			// bystander's face sits in the margin); box and descriptor would
-			// then describe different faces. When the two do not even overlap
-			// like two finds of the same face, the user is told the box moved.
+			// computed from, so that what the frontend shows is what the
+			// clustering compares. The face picked touches the drawn box, but a
+			// loose or misplaced box may overlap it only a little; when the two
+			// do not overlap like two finds of the same face, the user is told
+			// the box moved.
 			$boxAdjusted = FaceRect::overlapPercent(ManualFaceDetector::edges($drawn), ManualFaceDetector::edges($best))
 				< FaceRect::SAME_FACE_MIN_OVERLAP;
 
@@ -227,19 +233,25 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 	}
 
 	/**
-	 * Pick the largest detected face (by bounding-box area) from a detection
-	 * result, assuming the user centred the rectangle on the intended face.
+	 * The face the user marked, of the ones detected in the crop: the one
+	 * that overlaps the drawn box the most. The biggest one would be wrong
+	 * whenever a bigger face sits in the margin, and its descriptor would then
+	 * be stored for the person of the marking. A face that does not touch the
+	 * drawn box at all is only in the margin, and never the marked one, so if
+	 * every face is like that, there is none.
 	 *
+	 * @param array{x: int, y: int, width: int, height: int} $drawn
 	 * @param array<int, array<string, mixed>> $faces faces in pixels of the original photo
-	 * @return array<string, mixed> the best face, or [] if none
+	 * @return array<string, mixed>|null the marked face, or null if none is on the drawn box
 	 */
-	private function pickLargestFace(array $faces): array {
-		$best = [];
-		$bestArea = -1;
+	public static function pickMarkedFace(array $drawn, array $faces): ?array {
+		$drawnEdges = ManualFaceDetector::edges($drawn);
+		$best = null;
+		$bestOverlap = 0.0;
 		foreach ($faces as $face) {
-			$area = $face['width'] * $face['height'];
-			if ($area > $bestArea) {
-				$bestArea = $area;
+			$overlap = FaceRect::overlapPercent($drawnEdges, ManualFaceDetector::edges($face));
+			if ($overlap > $bestOverlap) {
+				$bestOverlap = $overlap;
 				$best = $face;
 			}
 		}

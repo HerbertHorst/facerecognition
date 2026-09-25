@@ -52,6 +52,44 @@ class ManualFaceDetectorTest extends TestCase {
 	}
 
 	/**
+	 * A small marked face is scaled up until it reaches the target side, and
+	 * no further, instead of filling the whole area of the model.
+	 */
+	public function testASmallMarkedFaceIsScaledUpToTheTargetSideOnly() {
+		// A face of 100 pixels, with the margin of 40% a crop of 180 x 180.
+		$area = ManualFaceDetector::analysisArea(180, 180, (int) self::ANALYSIS_AREA_2GB, 100);
+
+		$this->assertEquals(360 * 360, $area, 'twice, so that the face is 200 pixels');
+	}
+
+	/**
+	 * A tiny marked face is scaled up by at most MAX_UPSCALE, even though
+	 * reaching the target side would take more.
+	 */
+	public function testATinyMarkedFaceIsScaledUpByAtMostTheMaximum() {
+		// A face of 20 pixels, a crop of 36 x 36; the target side would need 10 times.
+		$area = ManualFaceDetector::analysisArea(36, 36, (int) self::ANALYSIS_AREA_2GB, 20);
+
+		$this->assertEquals(144 * 144, $area);
+	}
+
+	/**
+	 * A marked face bigger than the target side is not scaled up at all.
+	 */
+	public function testABigMarkedFaceIsNotScaledUp() {
+		$this->assertEquals(720 * 720, ManualFaceDetector::analysisArea(720, 720, (int) self::ANALYSIS_AREA_2GB, 400));
+	}
+
+	/**
+	 * A region, whose faces have no known size, is scaled up by at most
+	 * MAX_UPSCALE, and a large one is scaled down to the area of the model.
+	 */
+	public function testARegionIsScaledUpByAtMostTheMaximumAndDownToTheModel() {
+		$this->assertEquals(400 * 300, ManualFaceDetector::analysisArea(100, 75, (int) self::ANALYSIS_AREA_2GB));
+		$this->assertEquals((int) self::ANALYSIS_AREA_2GB, ManualFaceDetector::analysisArea(3128, 2128, (int) self::ANALYSIS_AREA_2GB));
+	}
+
+	/**
 	 * The margin is cut at the edges of the photo.
 	 */
 	public function testCropIsKeptInsideThePhoto() {
