@@ -128,6 +128,11 @@ class ManualRegionTask extends FaceRecognitionBackgroundTask {
 			return;
 		}
 
+		$orphaned = $this->regionMapper->deleteOrphaned();
+		if ($orphaned > 0) {
+			$this->log('Deleted ' . $orphaned . ' region(s) of photos that are gone');
+		}
+
 		$model = $this->modelManager->getCurrentModel();
 		if (is_null($model)) {
 			$this->log('No current model configured, skipping the regions marked by hand');

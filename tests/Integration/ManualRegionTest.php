@@ -217,6 +217,30 @@ class ManualRegionTest extends ManualFaceIntegrationTestCase {
 	}
 
 	/**
+	 * Deleting a photo removes its image and its faces, but not its regions:
+	 * the next run deletes those, and leaves the regions of the photos that
+	 * are still there alone.
+	 */
+	public function testTheRegionsOfADeletedPhotoAreDeletedByTheNextRun() {
+		$kept = $this->upload('kept.jpg', $this->lenna());
+		$gone = $this->upload('gone.jpg', $this->lenna());
+		$keptRegion = $this->regionMapper->enqueue($kept->getId(), 0, 0, 158, 158);
+		$goneRegion = $this->regionMapper->enqueue($gone->getId(), 0, 0, 158, 158);
+
+		// What PostDeleteListener and StaleImagesRemovalTask do with the image
+		// of a photo that is gone; the listener does not run in the tests.
+		$this->container->query(FaceMapper::class)->removeFromImage($gone->getId());
+		$this->container->query(ImageMapper::class)->delete($gone);
+		$this->assertCount(1, $this->regionMapper->findByImage($gone->getId()), 'The region is left behind until the next run');
+
+		$this->runRegionTask();
+
+		$this->assertEquals([], $this->regionMapper->findByImage($gone->getId()));
+		$this->assertEquals(ManualRegion::STATE_DONE, $this->region($kept->getId(), $keptRegion->getId())->getState());
+		$this->assertNotEquals($keptRegion->getId(), $goneRegion->getId());
+	}
+
+	/**
 	 * A region that fails records why, and it is not searched again.
 	 */
 	public function testARegionThatFailsIsNotSearchedAgain() {

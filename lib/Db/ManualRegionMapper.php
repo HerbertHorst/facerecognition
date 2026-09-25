@@ -152,6 +152,38 @@ class ManualRegionMapper extends QBMapper {
 	}
 
 	/**
+	 * Deletes the regions whose image is gone. An image goes in several ways,
+	 * deleting the photo, the cleanup of stale images, a reset, removing a
+	 * user, and they all remove its faces but know nothing of its regions;
+	 * this catches all of them at once. The ids are read first and deleted in
+	 * chunks, which works the same on every database.
+	 *
+	 * @return int how many regions were deleted
+	 */
+	public function deleteOrphaned(): int {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('r.id')
+			->from($this->getTableName(), 'r')
+			->leftJoin('r', 'facerecog_images', 'i', $qb->expr()->eq('r.image', 'i.id'))
+			->where($qb->expr()->isNull('i.id'));
+		$result = $qb->executeQuery();
+		$ids = [];
+		while ($row = $result->fetch()) {
+			$ids[] = (int) $row['id'];
+		}
+		$result->closeCursor();
+
+		foreach (array_chunk($ids, 1000) as $chunk) {
+			$delete = $this->db->getQueryBuilder();
+			$delete->delete($this->getTableName())
+				->where($delete->expr()->in('id', $delete->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+				->executeStatement();
+		}
+
+		return count($ids);
+	}
+
+	/**
 	 * Records that the region could not be searched, so that it is not taken
 	 * again on every run, and says why.
 	 */

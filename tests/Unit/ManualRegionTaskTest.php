@@ -228,6 +228,20 @@ class ManualRegionTaskTest extends ManualFaceTaskTestCase {
 	}
 
 	/**
+	 * The regions of photos that are gone are deleted on every run, before
+	 * the search, and the run says how many.
+	 */
+	public function testTheRegionsOfPhotosThatAreGoneAreDeleted() {
+		$this->regionMapper->method('isAvailable')->willReturn(true);
+		$this->faceMapper->method('hasManualStateColumn')->willReturn(true);
+		$this->regionMapper->expects($this->once())->method('deleteOrphaned')->willReturn(2);
+		$this->regionMapper->method('findPending')->willReturn([]);
+
+		$this->assertTrue($this->runTask($this->task()));
+		$this->assertLogged('[manual faces] Deleted 2 region(s) of photos that are gone');
+	}
+
+	/**
 	 * Before the migration ran there is no table of regions, and the task
 	 * steps aside, saying why.
 	 */
