@@ -152,6 +152,18 @@ class ManualRegionMapper extends QBMapper {
 	}
 
 	/**
+	 * Deletes the regions of one image, whatever their state: when a new
+	 * version of the photo replaces its faces, the regions and what their
+	 * search found belong to the old one.
+	 */
+	public function removeFromImage(int $imageId): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete($this->getTableName())
+			->where($qb->expr()->eq('image', $qb->createNamedParameter($imageId, IQueryBuilder::PARAM_INT)))
+			->executeStatement();
+	}
+
+	/**
 	 * Deletes the regions whose image is gone. An image goes in several ways,
 	 * deleting the photo, the cleanup of stale images, a reset, removing a
 	 * user, and they all remove its faces but know nothing of its regions;
