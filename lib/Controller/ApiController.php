@@ -463,6 +463,60 @@ $this->clusterMapper  = $clusterMapper;
 		return new JSONResponse($cluster, Http::STATUS_OK);
 	}
 
+	/**
+	 * Names a face that is in no cluster yet, like a marking saved without a
+	 * name: it gets a cluster of its own for the person of that name, as a
+	 * marking saved with a name does. A face that is in a cluster is renamed
+	 * through the cluster instead (ClusterController::updateName), which is
+	 * answered with a conflict here.
+	 *
+	 * The face is marked manual, so that analyzing the photo again keeps the
+	 * name; a marking already is.
+	 *
+	 * @NoAdminRequired
+	 * @CORS
+	 * @NoCSRFRequired
+	 *
+	 * @return JSONResponse
+	 */
+	public function nameFace(int $faceId, ?string $name = null): JSONResponse {
+		if (!$this->settingsService->getUserEnabled($this->userId))
+			return new JSONResponse([], Http::STATUS_PRECONDITION_FAILED);
+
+		$name = trim($name ?? '');
+		if ($name === '')
+			return new JSONResponse(['error' => 'a name is required'], Http::STATUS_BAD_REQUEST);
+
+		// The face comes from the request: it has to be one of this user's
+		// before anything is written.
+		$face = $this->faceMapper->find($faceId);
+		if (is_null($face))
+			return new JSONResponse([], Http::STATUS_NOT_FOUND);
+		if (is_null($this->imageMapper->find($this->userId, $face->getImage())))
+			return new JSONResponse([], Http::STATUS_FORBIDDEN);
+		if (!is_null($face->getCluster()))
+			return new JSONResponse(['error' => 'the face is in a cluster already'], Http::STATUS_CONFLICT);
+
+		$person = $this->personMapper->findOrCreateByName($this->userId, $name);
+		$clusterId = $this->clusterMapper->create($this->userId, $this->settingsService->getCurrentFaceModel());
+		$this->clusterMapper->setPerson($clusterId, $person->getId());
+
+		// The clustering may have placed the face since it was read above.
+		if (!$this->faceMapper->assignClusterIfNone($faceId, $clusterId)) {
+			$this->clusterMapper->removeIfEmpty($clusterId);
+			$this->personMapper->deleteOrphaned($this->userId);
+			return new JSONResponse(['error' => 'the face is in a cluster already'], Http::STATUS_CONFLICT);
+		}
+		$this->faceMapper->markFaceManual($faceId);
+
+		return new JSONResponse([
+			'faceId'    => $faceId,
+			'clusterId' => $clusterId,
+			'personId'  => $person->getId(),
+			'name'      => $person->getName(),
+		], Http::STATUS_OK);
+	}
+
 
 	/**
 	 * The clusters of the person of that name, which are the different ways

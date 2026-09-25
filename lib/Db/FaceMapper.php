@@ -668,6 +668,22 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
+	 * Puts a face that is in no cluster into the given one. Only if it is still
+	 * in none: the clustering may have placed it since it was looked at.
+	 *
+	 * @return bool whether the face was put there
+	 */
+	public function assignClusterIfNone(int $faceId, int $clusterId): bool {
+		$qb = $this->db->getQueryBuilder();
+		$changed = $qb->update($this->getTableName())
+			->set('cluster', $qb->createNamedParameter($clusterId, IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($faceId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->isNull('cluster'))
+			->executeStatement();
+		return $changed > 0;
+	}
+
+	/**
 	 * Marks a face as one the user put there by hand, which is what keeps the
 	 * analysis from replacing it: `imageProcessed()` deletes the faces the
 	 * model found last time, and a manual face is not something it can find

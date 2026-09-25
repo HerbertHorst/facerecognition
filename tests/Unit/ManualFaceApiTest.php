@@ -450,6 +450,97 @@ class ManualFaceApiTest extends TestCase {
 		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
 	}
 
+	// --- nameFace ---------------------------------------------------------
+
+	/** Nothing may be written: no person, no cluster, no face. */
+	private function expectNothingNamed(): void {
+		$this->personMapper->expects($this->never())->method('findOrCreateByName');
+		$this->clusterMapper->expects($this->never())->method('create');
+		$this->faceMapper->expects($this->never())->method('assignClusterIfNone');
+	}
+
+	/**
+	 * A marking saved without a name gets a cluster of its own for the person
+	 * of the name, like a marking saved with one, and is kept by a later
+	 * analysis.
+	 */
+	public function testAFaceWithoutClusterIsNamed() {
+		$this->enableUser();
+		$this->faceMapper->method('find')->with(100)->willReturn($this->faceOnImage(10, null));
+		$this->imageMapper->method('find')->with(self::USER, 10)->willReturn(new Image());
+		$this->personMapper->expects($this->once())->method('findOrCreateByName')
+			->with(self::USER, 'Alice')->willReturn($this->makePerson(5, 'Alice'));
+		$this->clusterMapper->expects($this->once())->method('create')->with(self::USER, 1)->willReturn(7);
+		$this->clusterMapper->expects($this->once())->method('setPerson')->with(7, 5);
+		$this->faceMapper->expects($this->once())->method('assignClusterIfNone')->with(100, 7)->willReturn(true);
+		$this->faceMapper->expects($this->once())->method('markFaceManual')->with(100);
+
+		$resp = $this->controller->nameFace(100, '  Alice ');
+
+		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
+		$this->assertEquals(['faceId' => 100, 'clusterId' => 7, 'personId' => 5, 'name' => 'Alice'], $resp->getData());
+	}
+
+	public function testNamingAFaceOfAnotherUserIsRefused() {
+		$this->enableUser();
+		$this->faceMapper->method('find')->with(100)->willReturn($this->faceOnImage(77, null));
+		$this->imageMapper->method('find')->with(self::USER, 77)->willReturn(null);
+		$this->expectNothingNamed();
+
+		$this->assertEquals(Http::STATUS_FORBIDDEN, $this->controller->nameFace(100, 'Alice')->getStatus());
+	}
+
+	public function testNamingAFaceThatDoesNotExistIsRefused() {
+		$this->enableUser();
+		$this->faceMapper->method('find')->willReturn(null);
+		$this->expectNothingNamed();
+
+		$this->assertEquals(Http::STATUS_NOT_FOUND, $this->controller->nameFace(404, 'Alice')->getStatus());
+	}
+
+	/** A face in a cluster is renamed through its cluster, not here. */
+	public function testNamingAFaceInAClusterIsRefused() {
+		$this->enableUser();
+		$this->faceMapper->method('find')->willReturn($this->faceOnImage(10, 3));
+		$this->imageMapper->method('find')->willReturn(new Image());
+		$this->expectNothingNamed();
+
+		$this->assertEquals(Http::STATUS_CONFLICT, $this->controller->nameFace(100, 'Alice')->getStatus());
+	}
+
+	/** @dataProvider noNameProvider */
+	public function testNamingAFaceWithoutANameIsRefused($name) {
+		$this->enableUser();
+		$this->expectNothingNamed();
+
+		$this->assertEquals(Http::STATUS_BAD_REQUEST, $this->controller->nameFace(100, $name)->getStatus());
+	}
+
+	/**
+	 * The clustering placed the face between reading it and naming it: the
+	 * cluster made for the name goes again, and the request says so.
+	 */
+	public function testAFaceThatWasClusteredMeanwhileIsNotNamed() {
+		$this->enableUser();
+		$this->faceMapper->method('find')->willReturn($this->faceOnImage(10, null));
+		$this->imageMapper->method('find')->willReturn(new Image());
+		$this->personMapper->method('findOrCreateByName')->willReturn($this->makePerson(5, 'Alice'));
+		$this->clusterMapper->method('create')->willReturn(7);
+		$this->faceMapper->method('assignClusterIfNone')->willReturn(false);
+		$this->clusterMapper->expects($this->once())->method('removeIfEmpty')->with(7);
+		$this->personMapper->expects($this->once())->method('deleteOrphaned')->with(self::USER);
+		$this->faceMapper->expects($this->never())->method('markFaceManual');
+
+		$this->assertEquals(Http::STATUS_CONFLICT, $this->controller->nameFace(100, 'Alice')->getStatus());
+	}
+
+	public function testNamingIsRefusedForADisabledUser() {
+		$this->settingsService->method('getUserEnabled')->willReturn(false);
+		$this->expectNothingNamed();
+
+		$this->assertEquals(Http::STATUS_PRECONDITION_FAILED, $this->controller->nameFace(100, 'Alice')->getStatus());
+	}
+
 	// --- getFacesForFile --------------------------------------------------
 
 	private function makeFace(int $id, ?int $cluster, int $size, float $confidence, ?bool $groupable, bool $manual, ?string $state, bool $boxAdjusted = false): Face {

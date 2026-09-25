@@ -207,6 +207,12 @@ return ['routes' =>
 		'url'  => '/api/2.0/file/{fileId}/faces',
 		'verb' => 'GET'
 	],
+	// Name a face that is in no cluster yet, such as a marking saved without a name
+	[
+		'name' => 'Api#nameFace',
+		'url'  => '/api/2.0/face/{faceId}/name',
+		'verb' => 'PUT'
+	],
 	// Add a manually drawn face, attached to a named person cluster or left for the clustering
 	[
 		'name' => 'Api#addManualFace',
