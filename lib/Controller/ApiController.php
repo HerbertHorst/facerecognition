@@ -46,12 +46,16 @@ use OCA\FaceRecognition\Db\PersonMapper;
 use OCA\FaceRecognition\Helper\FaceParticipation;
 use OCA\FaceRecognition\Helper\ManualFaceDetector;
 
+use OCA\FaceRecognition\Service\ManualFaceService;
 use OCA\FaceRecognition\Service\SettingsService;
 use OCA\FaceRecognition\Service\UrlService;
 
 use Psr\Log\LoggerInterface;
 
 class ApiController extends NcApiController {
+
+	/** How many faces one request may delete, ignore or stop ignoring */
+	private const MAX_FACES_PER_REQUEST = 500;
 
 	/** @var FaceMapper */
 	private $faceMapper;
@@ -74,6 +78,9 @@ class ApiController extends NcApiController {
 	/** @var ManualRegionMapper */
 	private $manualRegionMapper;
 
+	/** @var ManualFaceService */
+	private $manualFaceService;
+
 	/** @var LoggerInterface */
 	private $logger;
 
@@ -91,6 +98,7 @@ ClusterMapper   $clusterMapper,
 		UrlService      $urlService,
 		ManualRegionMapper $manualRegionMapper,
 		LoggerInterface $logger,
+		ManualFaceService $manualFaceService,
 		$UserId)
 	{
 		parent::__construct($AppName, $request);
@@ -103,6 +111,7 @@ $this->clusterMapper  = $clusterMapper;
 		$this->urlService      = $urlService;
 		$this->manualRegionMapper = $manualRegionMapper;
 		$this->logger          = $logger;
+		$this->manualFaceService = $manualFaceService;
 		$this->userId          = $UserId;
 	}
 
@@ -517,6 +526,117 @@ $this->clusterMapper  = $clusterMapper;
 		], Http::STATUS_OK);
 	}
 
+	/**
+	 * Deletes faces the user put there: markings, and the faces the search of
+	 * a region found. A face of the analysis cannot be deleted, since the next
+	 * analysis of the photo would find it again; it can be ignored instead.
+	 * Nothing is deleted unless every face may be.
+	 *
+	 * @NoAdminRequired
+	 * @CORS
+	 * @NoCSRFRequired
+	 *
+	 * @param int[] $faceIds
+	 */
+	public function deleteFaces(array $faceIds = []): JSONResponse {
+		$faces = $this->ownFaces($faceIds);
+		if ($faces instanceof JSONResponse)
+			return $faces;
+
+		if (!$this->faceMapper->hasManualStateColumn())
+			return $this->notMigrated('deletions of faces');
+
+		$refused = [];
+		foreach ($faces as $face) {
+			if (FaceParticipation::origin($face->getManualState()) !== FaceParticipation::ORIGIN_MANUAL) {
+				$refused[] = (int) $face->getId();
+			}
+		}
+		if (!empty($refused))
+			return new JSONResponse(['error' => 'only faces put there by hand can be deleted', 'faceIds' => $refused], Http::STATUS_CONFLICT);
+
+		$this->manualFaceService->delete($this->userId, $faces);
+
+		return new JSONResponse(['faceIds' => array_map(function (Face $face): int {
+			return (int) $face->getId();
+		}, $faces)], Http::STATUS_OK);
+	}
+
+	/**
+	 * Ignores faces: each is put in a hidden group of its own, out of the
+	 * lists of people and out of the clustering. It stays on the photo, so
+	 * that it is not marked or searched again. Faces ignored already are left
+	 * as they are.
+	 *
+	 * @NoAdminRequired
+	 * @CORS
+	 * @NoCSRFRequired
+	 *
+	 * @param int[] $faceIds
+	 */
+	public function ignoreFaces(array $faceIds = []): JSONResponse {
+		$faces = $this->ownFaces($faceIds);
+		if ($faces instanceof JSONResponse)
+			return $faces;
+
+		$ignored = $this->manualFaceService->ignore($this->userId, $this->settingsService->getCurrentFaceModel(), $faces);
+
+		return new JSONResponse(['faceIds' => $ignored], Http::STATUS_OK);
+	}
+
+	/**
+	 * Stops ignoring faces: they go back to the clustering, which places
+	 * them again. Faces that are not ignored are left as they are.
+	 *
+	 * @NoAdminRequired
+	 * @CORS
+	 * @NoCSRFRequired
+	 *
+	 * @param int[] $faceIds
+	 */
+	public function unignoreFaces(array $faceIds = []): JSONResponse {
+		$faces = $this->ownFaces($faceIds);
+		if ($faces instanceof JSONResponse)
+			return $faces;
+
+		$unignored = $this->manualFaceService->unignore($this->userId, $faces);
+
+		return new JSONResponse(['faceIds' => $unignored], Http::STATUS_OK);
+	}
+
+	/**
+	 * The faces of a request, all of them the user's, or the answer that
+	 * refuses the request: the faces come from the client, and have to be
+	 * checked before anything is written.
+	 *
+	 * @param mixed $faceIds
+	 *
+	 * @return Face[]|JSONResponse
+	 */
+	private function ownFaces($faceIds) {
+		if (!$this->settingsService->getUserEnabled($this->userId))
+			return new JSONResponse([], Http::STATUS_PRECONDITION_FAILED);
+
+		if (!is_array($faceIds) || empty($faceIds) || count($faceIds) > self::MAX_FACES_PER_REQUEST)
+			return new JSONResponse(['error' => 'between 1 and ' . self::MAX_FACES_PER_REQUEST . ' faces are needed'], Http::STATUS_BAD_REQUEST);
+
+		$faces = [];
+		foreach (array_unique($faceIds) as $faceId) {
+			if (!is_numeric($faceId))
+				return new JSONResponse(['error' => 'a face is not a number'], Http::STATUS_BAD_REQUEST);
+
+			$face = $this->faceMapper->find((int) $faceId);
+			if (is_null($face))
+				return new JSONResponse(['error' => 'face ' . (int) $faceId . ' does not exist'], Http::STATUS_NOT_FOUND);
+			if (is_null($this->imageMapper->find($this->userId, $face->getImage())))
+				return new JSONResponse([], Http::STATUS_FORBIDDEN);
+
+			$faces[] = $face;
+		}
+
+		return $faces;
+	}
+
 
 	/**
 	 * The clusters of the person of that name, which are the different ways
@@ -579,12 +699,16 @@ $this->clusterMapper  = $clusterMapper;
 			function () use ($clusterIds): array {
 				return $this->clusterMapper->findPersonNames($this->userId, $clusterIds);
 			});
+		$ignored = $this->unlessFailing('the ignored faces of file ' . $fileId,
+			function () use ($clusterIds): array {
+				return $this->clusterMapper->findHiddenIds($this->userId, $clusterIds);
+			});
 
 		$withState = $this->faceMapper->hasManualStateColumn();
 
 		$resp = [];
 		foreach ($faces as $face) {
-			$resp[] = $this->describeFace($face, $withState, $clusterSizes, $names, $limits);
+			$resp[] = $this->describeFace($face, $withState, $clusterSizes, $names, $ignored, $limits);
 		}
 
 		return new JSONResponse([
@@ -599,10 +723,12 @@ $this->clusterMapper  = $clusterMapper;
 	 *
 	 * @param array<int, int>|null $clusterSizes [clusterId => faces], null when unknown
 	 * @param array<int, string|null>|null $names [clusterId => name], null when unknown
+	 * @param int[]|null $ignoredClusters the hidden clusters, where the ignored faces are; null when unknown
 	 * @param array{minFaceSize: int, minConfidence: float} $limits
 	 */
-	private function describeFace(Face $face, bool $withState, ?array $clusterSizes, ?array $names, array $limits): array {
+	private function describeFace(Face $face, bool $withState, ?array $clusterSizes, ?array $names, ?array $ignoredClusters, array $limits): array {
 		$cluster = $face->getCluster();
+		$ignored = !is_null($cluster) && !is_null($ignoredClusters) && in_array((int) $cluster, $ignoredClusters, true);
 
 		$described = [
 			'id'             => $face->getId(),
@@ -622,6 +748,9 @@ $this->clusterMapper  = $clusterMapper;
 			// Null without a group, and null as well when the group is there but
 			// its size could not be found out.
 			'clusterSize'    => is_null($cluster) || is_null($clusterSizes) ? null : ($clusterSizes[(int) $cluster] ?? null),
+			// Ignored by the user: in a hidden group of its own. Null when that
+			// could not be found out.
+			'ignored'        => is_null($ignoredClusters) ? null : $ignored,
 		];
 
 		// Before the migration ran there is no state to derive anything from,
@@ -633,7 +762,7 @@ $this->clusterMapper  = $clusterMapper;
 		$state = $face->getManualState();
 		$participation = FaceParticipation::derive($state, $face->getIsGroupable(),
 			(int) $face->getWidth(), (int) $face->getHeight(), (float) $face->getConfidence(),
-			$limits['minFaceSize'], $limits['minConfidence']);
+			$limits['minFaceSize'], $limits['minConfidence'], $ignored);
 
 		$described['manualState'] = $state;
 		$described['boxAdjusted'] = (bool) $face->getBoxAdjusted();

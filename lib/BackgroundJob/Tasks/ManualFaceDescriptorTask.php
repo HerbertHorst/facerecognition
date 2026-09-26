@@ -34,6 +34,7 @@ use OCA\FaceRecognition\Model\IModel;
 use OCA\FaceRecognition\Model\ModelManager;
 
 use OCA\FaceRecognition\Service\FileService;
+use OCA\FaceRecognition\Service\ManualFaceService;
 use OCA\FaceRecognition\Service\SettingsService;
 
 /**
@@ -45,7 +46,10 @@ use OCA\FaceRecognition\Service\SettingsService;
  *
  * If a face is found, the marking takes its descriptor, its box and the
  * confidence the detector gave it, and from then on the clustering treats it
- * like any other face, minimums included. If no face can be detected on the
+ * like any other face, minimums included. If that face is on the photo
+ * already, found by the analysis or marked before, the marking is merged into
+ * it instead (see ManualFaceService::mergeMarking()), so the user does not see
+ * the same face twice. If no face can be detected on the
  * marked region, only in the margin around it, or none at all, the face is
  * simply excluded from clustering: it stays pinned
  * to its person, if it has one. No fallback descriptor is fabricated.
@@ -75,11 +79,15 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 	/** @var ManualFaceDetector */
 	private $detector;
 
-	public function __construct(FaceMapper      $faceMapper,
-	                            FileService     $fileService,
-	                            SettingsService $settingsService,
-	                            ModelManager    $modelManager,
-	                            ITempManager    $tempManager)
+	/** @var ManualFaceService */
+	private $manualFaces;
+
+	public function __construct(FaceMapper        $faceMapper,
+	                            FileService       $fileService,
+	                            SettingsService   $settingsService,
+	                            ModelManager      $modelManager,
+	                            ITempManager      $tempManager,
+	                            ManualFaceService $manualFaces)
 	{
 		parent::__construct();
 
@@ -87,6 +95,7 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 		$this->settingsService = $settingsService;
 		$this->modelManager    = $modelManager;
 		$this->detector        = new ManualFaceDetector($fileService, $tempManager);
+		$this->manualFaces     = $manualFaces;
 	}
 
 	/**
@@ -130,6 +139,8 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 
 		$opened = false;
 		foreach ($this->context->getEligibleUsers() as $userId) {
+			$this->mergeDuplicatesOnce($userId, $modelId);
+
 			$pending = $this->faceMapper->findManualFacesPendingDescriptor($userId, $modelId);
 			if (count($pending) === 0) {
 				continue;
@@ -197,6 +208,10 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 			$boxAdjusted = FaceRect::overlapPercent(ManualFaceDetector::edges($drawn), ManualFaceDetector::edges($best))
 				< FaceRect::SAME_FACE_MIN_OVERLAP;
 
+			if ($this->mergeIntoSameFace($userId, $row, $best)) {
+				return;
+			}
+
 			$this->faceMapper->setManualFaceDescriptor(
 				$faceId, $best['descriptor'],
 				$best['x'], $best['y'], $best['width'], $best['height'],
@@ -215,6 +230,54 @@ class ManualFaceDescriptorTask extends FaceRecognitionBackgroundTask {
 			} catch (\Throwable $e) {
 				$this->warn('Manual face ' . $faceId . ': could not remove the temporary files (' . $e->getMessage() . ')');
 			}
+		}
+	}
+
+	/**
+	 * Merges the marking into the face the search found, if that face is on
+	 * the photo already: found by the analysis, or marked before. A marking
+	 * the user ignored is kept as it is.
+	 *
+	 * @param array<string, mixed> $row the marking: id, image, cluster
+	 * @param array<string, mixed> $found the face the search found, in pixels of the photo
+	 *
+	 * @return bool whether the marking was merged, and is gone
+	 */
+	private function mergeIntoSameFace(string $userId, array $row, array $found): bool {
+		$markingCluster = is_null($row['cluster']) ? null : (int) $row['cluster'];
+		if ($this->manualFaces->isIgnored($userId, $markingCluster)) {
+			return false;
+		}
+
+		$same = ManualFaceService::sameFace($found, $this->faceMapper->findComparableFacesOfImage((int) $row['image']));
+		if (is_null($same)) {
+			return false;
+		}
+
+		$tookName = $this->manualFaces->mergeMarking($userId, (int) $row['id'], $markingCluster, $same);
+		$this->log('Manual face ' . $row['id'] . ': the face it marks is face ' . $same->getId() . ', which was on the photo already; the marking is merged into it'
+			. ($tookName ? ', and that face takes its name' : ''));
+		return true;
+	}
+
+	/**
+	 * Merges, once for each user, the markings that were searched before the
+	 * search merged them and turned out to be a face already on the photo. A
+	 * failure is logged, and it is tried again on the next run.
+	 */
+	private function mergeDuplicatesOnce(string $userId, int $modelId): void {
+		if ($this->settingsService->getManualDuplicatesMerged($userId)) {
+			return;
+		}
+		try {
+			$merged = $this->manualFaces->mergeFoundMarkings($userId, $modelId);
+			$this->settingsService->setManualDuplicatesMerged($userId);
+			if ($merged > 0) {
+				$this->log('Merged ' . $merged . ' marking(s) of user ' . $userId . ' into the face that was on the photo already');
+			}
+		} catch (\Throwable $e) {
+			$this->warn('The markings of user ' . $userId . ' that are a face already on the photo could not be merged, they are left for the next run: ' . $e->getMessage());
+			$this->logDebug((string) $e);
 		}
 	}
 

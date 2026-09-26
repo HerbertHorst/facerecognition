@@ -66,8 +66,13 @@ class FaceMapper extends QBMapper {
 	}
 
 	public function find (int $faceId): ?Face {
+		$columns = ['id', 'image', 'cluster', 'x', 'y', 'width', 'height', 'landmarks', 'descriptor', 'confidence', 'is_groupable', 'is_manual'];
+		if ($this->hasManualStateColumn()) {
+			$columns[] = 'manual_state';
+		}
+
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'image', 'cluster', 'x', 'y', 'width', 'height', 'landmarks', 'descriptor', 'confidence')
+		$qb->select(...$columns)
 			->from($this->getTableName(), 'f')
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($faceId)));
 		try {
@@ -668,6 +673,111 @@ class FaceMapper extends QBMapper {
 	}
 
 	/**
+	 * Puts a face in a cluster, or in none, and says whether the clustering may
+	 * group it. It is marked manual as well, so that analyzing the photo again
+	 * keeps where the user put it.
+	 */
+	public function placeFace(int $faceId, ?int $clusterId, bool $groupable): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->update($this->getTableName())
+			->set('cluster', is_null($clusterId)
+				? $qb->createNamedParameter(null, IQueryBuilder::PARAM_NULL)
+				: $qb->createNamedParameter($clusterId, IQueryBuilder::PARAM_INT))
+			->set('is_groupable', $qb->createNamedParameter($groupable, IQueryBuilder::PARAM_BOOL))
+			->set('is_manual', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($faceId, IQueryBuilder::PARAM_INT)))
+			->executeStatement();
+	}
+
+	/**
+	 * Deletes the given faces. Their clusters are left to the caller, which
+	 * knows which of them may have become empty.
+	 *
+	 * @param int[] $faceIds
+	 */
+	public function deleteFaces(array $faceIds): void {
+		foreach (array_chunk(array_values(array_unique(array_map('intval', $faceIds))), 1000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->delete($this->getTableName())
+				->where($qb->expr()->in('id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+				->executeStatement();
+		}
+	}
+
+	/**
+	 * The faces of an image that a find can be compared with: the ones with a
+	 * descriptor. The markings still waiting for their search, and the ones it
+	 * found nothing for, have none and are left out.
+	 *
+	 * @return Face[]
+	 */
+	public function findComparableFacesOfImage(int $imageId): array {
+		$columns = ['id', 'image', 'cluster', 'x', 'y', 'width', 'height', 'is_groupable', 'is_manual'];
+		if ($this->hasManualStateColumn()) {
+			$columns[] = 'manual_state';
+		}
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->select(...$columns)
+			->from($this->getTableName())
+			->where($qb->expr()->eq('image', $qb->createNamedParameter($imageId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->neq('descriptor', $qb->createNamedParameter('[]'), IQueryBuilder::PARAM_JSON))
+			->orderBy('id', 'ASC');
+
+		return $this->findEntities($qb);
+	}
+
+	/**
+	 * The markings of a user whose search found a face, with their image, so
+	 * that the ones that turned out to be a face already there can be found.
+	 * The faces the search of a region created are among them.
+	 *
+	 * @return array<int, array<string, mixed>> rows with id, image, cluster, x, y, width, height
+	 */
+	public function findFoundMarkings(string $userId, int $modelId): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('f.id', 'f.image', 'f.cluster', 'f.x', 'f.y', 'f.width', 'f.height')
+			->from($this->getTableName(), 'f')
+			->innerJoin('f', 'facerecog_images', 'i', $qb->expr()->eq('f.image', 'i.id'))
+			->where($qb->expr()->eq('i.user', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('i.model', $qb->createNamedParameter($modelId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('f.is_manual', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)))
+			->andWhere($qb->expr()->eq('f.manual_state', $qb->createNamedParameter(Face::MANUAL_STATE_FOUND)))
+			->orderBy('f.image', 'ASC')
+			->addOrderBy('f.id', 'DESC');
+
+		$result = $qb->executeQuery();
+		$rows = $result->fetchAll();
+		$result->closeCursor();
+
+		return $rows;
+	}
+
+	/**
+	 * The faces of an image that the user ignored: the ones in a hidden
+	 * cluster.
+	 *
+	 * @return int[]
+	 */
+	public function findIgnoredFaceIdsOfImage(int $imageId): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('f.id')
+			->from($this->getTableName(), 'f')
+			->innerJoin('f', 'facerecog_clusters', 'c', $qb->expr()->eq('f.cluster', 'c.id'))
+			->where($qb->expr()->eq('f.image', $qb->createNamedParameter($imageId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('c.is_visible', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)));
+
+		$result = $qb->executeQuery();
+		$ids = [];
+		while ($row = $result->fetch()) {
+			$ids[] = (int) $row['id'];
+		}
+		$result->closeCursor();
+
+		return $ids;
+	}
+
+	/**
 	 * Puts a face that is in no cluster into the given one. Only if it is still
 	 * in none: the clustering may have placed it since it was looked at.
 	 *
@@ -783,11 +893,11 @@ class FaceMapper extends QBMapper {
 	 * search gave up on or one that was never searched, which that column
 	 * cannot tell apart.
 	 *
-	 * @return array<int, array<string, mixed>> rows with id, file, x, y, width, height
+	 * @return array<int, array<string, mixed>> rows with id, image, cluster, file, x, y, width, height
 	 */
 	public function findManualFacesPendingDescriptor(string $userId, int $modelId): array {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.id', 'i.file', 'f.x', 'f.y', 'f.width', 'f.height')
+		$qb->select('f.id', 'f.image', 'f.cluster', 'i.file', 'f.x', 'f.y', 'f.width', 'f.height')
 			->from($this->getTableName(), 'f')
 			->innerJoin('f', 'facerecog_images', 'i', $qb->expr()->eq('f.image', 'i.id'))
 			->where($qb->expr()->eq('i.user', $qb->createNamedParameter($userId)))

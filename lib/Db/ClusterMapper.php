@@ -221,6 +221,50 @@ class ClusterMapper extends QBMapper {
 	}
 
 	/**
+	 * Creates an empty hidden cluster, the place of a face the user ignored:
+	 * hidden clusters are left out of the lists of people, and the clustering
+	 * never merges them.
+	 */
+	public function createHidden(string $userId, int $modelId): int {
+		$clusterId = $this->create($userId, $modelId);
+		$this->setVisibility($clusterId, false);
+		return $clusterId;
+	}
+
+	/**
+	 * Which of the given clusters of the user are hidden.
+	 *
+	 * @param int[] $clusterIds
+	 *
+	 * @return int[]
+	 */
+	public function findHiddenIds(string $userId, array $clusterIds): array {
+		$hidden = [];
+		$clusterIds = array_values(array_unique(array_map('intval', $clusterIds)));
+		if (empty($clusterIds)) {
+			return $hidden;
+		}
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('user', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('is_visible', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)))
+			->andWhere($qb->expr()->in('id', $qb->createParameter('cluster_ids')));
+
+		foreach (array_chunk($clusterIds, 1000) as $chunk) {
+			$qb->setParameter('cluster_ids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
+			$result = $qb->executeQuery();
+			while ($row = $result->fetch()) {
+				$hidden[] = (int) $row['id'];
+			}
+			$result->closeCursor();
+		}
+
+		return $hidden;
+	}
+
+	/**
 	 * Puts the given faces in the given cluster, in as few statements as
 	 * possible: a face is only ever added to a cluster, so there is no need to
 	 * touch the faces that are already there.

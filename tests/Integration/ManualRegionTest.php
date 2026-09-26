@@ -41,6 +41,7 @@ use OCA\FaceRecognition\Helper\ManualFaceDetector;
 
 use OCA\FaceRecognition\Model\ModelManager;
 
+use OCA\FaceRecognition\Service\ManualFaceService;
 use OCA\FaceRecognition\Service\FileService;
 use OCA\FaceRecognition\Service\SettingsService;
 use OCA\FaceRecognition\Service\UrlService;
@@ -97,6 +98,7 @@ class ManualRegionTest extends ManualFaceIntegrationTestCase {
 			$urlService,
 			$this->regionMapper,
 			$this->container->query(LoggerInterface::class),
+			$this->container->query(ManualFaceService::class),
 			$uid);
 	}
 

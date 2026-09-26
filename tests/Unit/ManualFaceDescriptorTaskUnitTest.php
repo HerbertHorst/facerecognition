@@ -24,6 +24,10 @@ use OCP\Files\File;
 
 use OCA\FaceRecognition\BackgroundJob\Tasks\ManualFaceDescriptorTask;
 
+use OCA\FaceRecognition\Db\Face;
+
+use OCA\FaceRecognition\Service\ManualFaceService;
+
 /**
  * The search of a marking for a descriptor, with a model whose finds the test
  * decides, so that what is stored can be compared with what was found.
@@ -34,18 +38,34 @@ use OCA\FaceRecognition\BackgroundJob\Tasks\ManualFaceDescriptorTask;
  */
 class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 
+	/** @var ManualFaceService|\PHPUnit\Framework\MockObject\MockObject */
+	private $manualFaces;
+
 	public function setUp(): void {
 		parent::setUp();
 		// The crop is 90 x 90, analyzed at its own size.
 		$this->model->method('getMaximumArea')->willReturn(90 * 90);
+		$this->manualFaces = $this->createMock(ManualFaceService::class);
 	}
 
 	private function task(): ManualFaceDescriptorTask {
-		return new ManualFaceDescriptorTask($this->faceMapper, $this->fileService, $this->settingsService, $this->modelManager, $this->tempManager);
+		return new ManualFaceDescriptorTask($this->faceMapper, $this->fileService, $this->settingsService, $this->modelManager, $this->tempManager, $this->manualFaces);
 	}
 
-	private static function pending(int $id, int $fileId = 500): array {
-		return ['id' => $id, 'file' => $fileId, 'x' => 40, 'y' => 40, 'width' => 50, 'height' => 50];
+	private static function pending(int $id, int $fileId = 500, ?int $cluster = null): array {
+		return ['id' => $id, 'image' => 10, 'cluster' => $cluster, 'file' => $fileId, 'x' => 40, 'y' => 40, 'width' => 50, 'height' => 50];
+	}
+
+	/** A face of the photo, as findComparableFacesOfImage() gives it */
+	private static function faceOnThePhoto(int $id, int $x, int $y, int $width, int $height): Face {
+		$face = new Face();
+		$face->setId($id);
+		$face->setImage(10);
+		$face->setX($x);
+		$face->setY($y);
+		$face->setWidth($width);
+		$face->setHeight($height);
+		return $face;
 	}
 
 	private function migratedWith(array $pending): void {
@@ -268,5 +288,101 @@ class ManualFaceDescriptorTaskUnitTest extends ManualFaceTaskTestCase {
 		$this->model->expects($this->never())->method('open');
 
 		$this->assertTrue($this->runTask($this->task()));
+	}
+
+	// --- A marking of a face already on the photo -------------------------
+
+	/**
+	 * The search finds a face that the analysis had found already, a little
+	 * off: the marking is merged into that face, and not stored as a second
+	 * box on top of it.
+	 */
+	public function testAFindThatIsAFaceAlreadyThereIsMergedIntoIt() {
+		$this->migratedWith([self::pending(7, 500, 3)]);
+		$this->everyFileExists();
+		$this->modelFinds([self::rawFace(20, 20, 70, 70, 1.0)]);
+		$there = self::faceOnThePhoto(99, 42, 43, 50, 48);
+		$this->faceMapper->method('findComparableFacesOfImage')->with(10)->willReturn([$there]);
+
+		$this->manualFaces->expects($this->once())->method('mergeMarking')->with(self::USER, 7, 3, $there)->willReturn(true);
+		$this->faceMapper->expects($this->never())->method('setManualFaceDescriptor');
+		$this->faceMapper->expects($this->never())->method('markManualFaceNotGroupable');
+
+		$this->assertTrue($this->runTask($this->task()));
+		$this->assertLogged('[manual faces] Manual face 7: the face it marks is face 99');
+	}
+
+	/**
+	 * A face next to the one found is another face: the marking keeps what
+	 * its search found.
+	 */
+	public function testAFindNextToAnotherFaceIsStoredAsBefore() {
+		$this->migratedWith([self::pending(7)]);
+		$this->everyFileExists();
+		$this->modelFinds([self::rawFace(20, 20, 70, 70, 1.0)]);
+		$this->faceMapper->method('findComparableFacesOfImage')->willReturn([self::faceOnThePhoto(99, 95, 40, 50, 50)]);
+
+		$this->manualFaces->expects($this->never())->method('mergeMarking');
+		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor')
+			->with(7, $this->anything(), 40, 40, 50, 50, 1.0, false);
+
+		$this->runTask($this->task());
+	}
+
+	/**
+	 * A marking the user ignored stays as it is, even on a face already
+	 * there: merging it would bring its face back.
+	 */
+	public function testAnIgnoredMarkingIsNotMerged() {
+		$this->migratedWith([self::pending(7, 500, 3)]);
+		$this->everyFileExists();
+		$this->modelFinds([self::rawFace(20, 20, 70, 70, 1.0)]);
+		$this->faceMapper->method('findComparableFacesOfImage')->willReturn([self::faceOnThePhoto(99, 40, 40, 50, 50)]);
+		$this->manualFaces->method('isIgnored')->with(self::USER, 3)->willReturn(true);
+
+		$this->manualFaces->expects($this->never())->method('mergeMarking');
+		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor');
+
+		$this->runTask($this->task());
+	}
+
+	/**
+	 * The markings found before this search merged them are merged once for
+	 * each user, and that is recorded, so it does not run again.
+	 */
+	public function testTheMarkingsFoundBeforeAreMergedOnce() {
+		$this->migratedWith([]);
+		$this->settingsService->method('getManualDuplicatesMerged')->with(self::USER)->willReturn(false);
+		$this->manualFaces->expects($this->once())->method('mergeFoundMarkings')->with(self::USER, 1)->willReturn(2);
+		$this->settingsService->expects($this->once())->method('setManualDuplicatesMerged')->with(self::USER);
+
+		$this->assertTrue($this->runTask($this->task()));
+		$this->assertLogged('[manual faces] Merged 2 marking(s) of user alice');
+	}
+
+	public function testTheMarkingsFoundBeforeAreNotMergedTwice() {
+		$this->migratedWith([]);
+		$this->settingsService->method('getManualDuplicatesMerged')->willReturn(true);
+		$this->manualFaces->expects($this->never())->method('mergeFoundMarkings');
+
+		$this->assertTrue($this->runTask($this->task()));
+	}
+
+	/**
+	 * A failure of that merge is a warning, is tried again on the next run,
+	 * and the markings waiting for their search are still searched.
+	 */
+	public function testAFailingMergeOfTheMarkingsFoundBeforeIsTriedAgain() {
+		$this->migratedWith([self::pending(7)]);
+		$this->everyFileExists();
+		$this->modelFinds([self::rawFace(20, 20, 70, 70, 1.0)]);
+		$this->settingsService->method('getManualDuplicatesMerged')->willReturn(false);
+		$this->manualFaces->method('mergeFoundMarkings')->willThrowException(new \RuntimeException('deadlock'));
+
+		$this->settingsService->expects($this->never())->method('setManualDuplicatesMerged');
+		$this->faceMapper->expects($this->once())->method('setManualFaceDescriptor');
+
+		$this->assertTrue($this->runTask($this->task()));
+		$this->assertWarned('could not be merged, they are left for the next run: deadlock');
 	}
 }

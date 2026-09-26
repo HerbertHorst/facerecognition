@@ -54,6 +54,9 @@ class FaceParticipation {
 	/** The user took the face out of its group */
 	public const REASON_DETACHED = 'detached';
 
+	/** The user ignored the face: it is in a hidden group of its own */
+	public const REASON_IGNORED = 'ignored';
+
 	/** Found by the analysis of the photo, including the markings it confirmed later */
 	public const ORIGIN_AUTO = 'auto';
 
@@ -70,10 +73,14 @@ class FaceParticipation {
 	 *
 	 * @param string|null $manualState the state of the search of a marking, null for any other face
 	 * @param bool|null $isGroupable as stored; anything but true is not groupable, like in the queries of the clustering
+	 * @param bool $ignored whether the face is in a hidden group, which is what ignoring it does. It comes first, since it is the decision of the user.
 	 *
 	 * @return array{clustering: string, excludedReason: string|null}
 	 */
-	public static function derive(?string $manualState, ?bool $isGroupable, int $width, int $height, float $confidence, int $minFaceSize, float $minConfidence): array {
+	public static function derive(?string $manualState, ?bool $isGroupable, int $width, int $height, float $confidence, int $minFaceSize, float $minConfidence, bool $ignored = false): array {
+		if ($ignored) {
+			return ['clustering' => self::EXCLUDED, 'excludedReason' => self::REASON_IGNORED];
+		}
 		if ($manualState === Face::MANUAL_STATE_PENDING) {
 			return ['clustering' => self::PENDING, 'excludedReason' => null];
 		}

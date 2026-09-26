@@ -213,6 +213,22 @@ return ['routes' =>
 		'url'  => '/api/2.0/face/{faceId}/name',
 		'verb' => 'PUT'
 	],
+	// Delete faces put there by hand, ignore faces, or stop ignoring them; the faces are in the body
+	[
+		'name' => 'Api#deleteFaces',
+		'url'  => '/api/2.0/faces/delete',
+		'verb' => 'POST'
+	],
+	[
+		'name' => 'Api#ignoreFaces',
+		'url'  => '/api/2.0/faces/ignore',
+		'verb' => 'POST'
+	],
+	[
+		'name' => 'Api#unignoreFaces',
+		'url'  => '/api/2.0/faces/unignore',
+		'verb' => 'POST'
+	],
 	// Add a manually drawn face, attached to a named person cluster or left for the clustering
 	[
 		'name' => 'Api#addManualFace',

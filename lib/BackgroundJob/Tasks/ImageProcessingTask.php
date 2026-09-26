@@ -576,6 +576,17 @@ class ImageProcessingTask extends FaceRecognitionBackgroundTask {
 
 		$matches = FaceRect::matchClusters($new, $old);
 
+		// A marking whose search found no face goes back into the clustering
+		// when the analysis finds one, but not if the user ignored it: in its
+		// hidden cluster it would be a sample, and faces would join it there.
+		$ignored = [];
+		foreach ($manualFaces as $manualFace) {
+			if ($manualFace->getManualState() === Face::MANUAL_STATE_NO_FACE && !is_null($manualFace->getCluster())) {
+				$ignored = $this->faceMapper->findIgnoredFaceIdsOfImage($image->getId());
+				break;
+			}
+		}
+
 		$insert = [];
 		$overwrites = [];
 		foreach ($faces as $index => $face) {
@@ -592,7 +603,7 @@ class ImageProcessingTask extends FaceRecognitionBackgroundTask {
 					$overwrites[$oldId] = [
 						'face' => $face,
 						'confirm' => !is_null($state),
-						'regroup' => $state === Face::MANUAL_STATE_NO_FACE,
+						'regroup' => $state === Face::MANUAL_STATE_NO_FACE && !in_array($oldId, $ignored, true),
 					];
 				}
 				continue;

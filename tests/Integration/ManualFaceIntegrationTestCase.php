@@ -44,6 +44,7 @@ use OCA\FaceRecognition\Model\DlibCnnModel\DlibCnn5Model;
 use OCA\FaceRecognition\Model\DlibHogModel\DlibHogModel;
 use OCA\FaceRecognition\Model\ModelManager;
 
+use OCA\FaceRecognition\Service\ManualFaceService;
 use OCA\FaceRecognition\Service\FileService;
 use OCA\FaceRecognition\Service\SettingsService;
 
@@ -341,7 +342,8 @@ abstract class ManualFaceIntegrationTestCase extends IntegrationTestCase {
 			$this->container->query(FileService::class),
 			$this->container->query(SettingsService::class),
 			$this->container->query(ModelManager::class),
-			$this->container->query('OCP\ITempManager')));
+			$this->container->query('OCP\ITempManager'),
+			$this->container->query(ManualFaceService::class)));
 	}
 
 	protected function runRegionTask(): void {

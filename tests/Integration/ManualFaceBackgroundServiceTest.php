@@ -51,6 +51,8 @@ class ManualFaceBackgroundServiceTest extends ManualFaceIntegrationTestCase {
 		// finds the face first and takes the marking over (see
 		// AnalysisTakesOverManualFaceTest), and the search of the marking,
 		// which is what this test is about, would have nothing left to do.
+		// This way the search runs, finds the face of the analysis, and
+		// merges the marking into it (see ManualFaceMergeAndIgnoreTest).
 		// It comes before the missing file, whose image the analysis would
 		// report as stale, and the run would then remove it.
 		$image = $this->upload('big.jpg', $this->lennaScaled(3));
@@ -71,15 +73,17 @@ class ManualFaceBackgroundServiceTest extends ManualFaceIntegrationTestCase {
 		$this->assertEquals(Face::MANUAL_STATE_NO_FACE, $this->row($brokenMarking->getId())['manual_state']);
 		$this->assertEquals(ManualRegion::STATE_FAILED, $this->stateOfRegion($missing->getId(), $brokenRegion->getId()));
 
-		// The good ones after them were searched.
-		$row = $this->row($marking->getId());
-		$this->assertEquals(Face::MANUAL_STATE_FOUND, $row['manual_state']);
+		// The good ones after them were searched: the marking turned out to be
+		// the face the analysis had found, and went into it.
+		$this->assertNull($this->row($marking->getId()), 'The marking was searched, and merged into the face of the analysis');
+		$faceIds = $this->faceIdsOf($image->getId());
+		$this->assertCount(1, $faceIds);
 		$this->assertEquals(ManualRegion::STATE_DONE, $this->stateOfRegion($image->getId(), $region->getId()));
 
 		// The clustering ran after them.
 		$imageMapper = $this->container->query(ImageMapper::class);
 		$this->assertTrue($imageMapper->find($this->user->getUID(), $image->getId())->getIsProcessed());
-		$this->assertNotNull($row['cluster'], 'The clustering must have run after the search');
+		$this->assertNotNull($this->row($faceIds[0])['cluster'], 'The clustering must have run after the search');
 	}
 
 	private function stateOfRegion(int $imageId, int $regionId): string {

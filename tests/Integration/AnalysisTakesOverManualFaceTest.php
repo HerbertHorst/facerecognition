@@ -36,6 +36,7 @@ use OCA\FaceRecognition\Db\ImageMapper;
 use OCA\FaceRecognition\Db\ManualRegionMapper;
 use OCA\FaceRecognition\Db\PersonMapper;
 
+use OCA\FaceRecognition\Service\ManualFaceService;
 use OCA\FaceRecognition\Service\ClusterLinkService;
 use OCA\FaceRecognition\Service\SettingsService;
 use OCA\FaceRecognition\Service\UrlService;
@@ -286,6 +287,7 @@ class AnalysisTakesOverManualFaceTest extends ManualFaceIntegrationTestCase {
 			$this->urlService(),
 			$this->container->query(ManualRegionMapper::class),
 			$this->container->query(LoggerInterface::class),
+			$this->container->query(ManualFaceService::class),
 			$this->user->getUID());
 	}
 }

@@ -41,6 +41,7 @@ use OCA\FaceRecognition\Db\ManualRegionMapper;
 use OCA\FaceRecognition\Db\Person;
 use OCA\FaceRecognition\Db\PersonMapper;
 
+use OCA\FaceRecognition\Service\ManualFaceService;
 use OCA\FaceRecognition\Service\SettingsService;
 use OCA\FaceRecognition\Service\UrlService;
 
@@ -72,6 +73,8 @@ class ManualFaceApiTest extends TestCase {
 	private $manualRegionMapper;
 	/** @var LoggerInterface|\PHPUnit\Framework\MockObject\MockObject */
 	private $logger;
+	/** @var ManualFaceService|\PHPUnit\Framework\MockObject\MockObject */
+	private $manualFaceService;
 	/** @var ApiController */
 	private $controller;
 
@@ -87,6 +90,7 @@ class ManualFaceApiTest extends TestCase {
 		$this->urlService         = $this->createMock(UrlService::class);
 		$this->manualRegionMapper = $this->createMock(ManualRegionMapper::class);
 		$this->logger             = $this->createMock(LoggerInterface::class);
+		$this->manualFaceService  = $this->createMock(ManualFaceService::class);
 
 		$this->controller = new ApiController(
 			'facerecognition',
@@ -99,6 +103,7 @@ class ManualFaceApiTest extends TestCase {
 			$this->urlService,
 			$this->manualRegionMapper,
 			$this->logger,
+			$this->manualFaceService,
 			self::USER
 		);
 	}
@@ -541,6 +546,163 @@ class ManualFaceApiTest extends TestCase {
 		$this->assertEquals(Http::STATUS_PRECONDITION_FAILED, $this->controller->nameFace(100, 'Alice')->getStatus());
 	}
 
+	// --- deleteFaces, ignoreFaces, unignoreFaces -------------------------
+
+	/**
+	 * Faces 100 and 101 on the image 10 of the user, 102 on the image 77 of
+	 * somebody else, in the given states.
+	 */
+	private function facesInStates(?string $state100, ?string $state101): void {
+		$faces = [
+			100 => $this->faceOnImage(10, 3),
+			101 => $this->faceOnImage(10, null),
+			102 => $this->faceOnImage(77, null),
+		];
+		$faces[100]->setManualState($state100);
+		$faces[101]->setId(101);
+		$faces[101]->setManualState($state101);
+		$faces[102]->setId(102);
+		$this->faceMapper->method('find')->willReturnCallback(function (int $id) use ($faces) {
+			return $faces[$id] ?? null;
+		});
+		$this->imageMapper->method('find')->willReturnCallback(function (string $user, int $imageId) {
+			return $imageId === 10 ? new Image() : null;
+		});
+	}
+
+	/** Markings, and the faces the search of a region found, are deleted. */
+	public function testFacesPutThereByHandAreDeleted() {
+		$this->enableUser();
+		$this->migrated();
+		$this->facesInStates(Face::MANUAL_STATE_FOUND, Face::MANUAL_STATE_PENDING);
+		$this->manualFaceService->expects($this->once())->method('delete')
+			->with(self::USER, $this->callback(function (array $faces): bool {
+				return array_map(function (Face $face) { return $face->getId(); }, $faces) === [100, 101];
+			}));
+
+		$resp = $this->controller->deleteFaces([100, 101]);
+
+		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
+		$this->assertEquals(['faceIds' => [100, 101]], $resp->getData());
+	}
+
+	/**
+	 * A face of the analysis would come back with the next analysis of the
+	 * photo, so it is not deleted, and neither are the others of the request.
+	 */
+	public function testAFaceOfTheAnalysisIsNotDeleted() {
+		$this->enableUser();
+		$this->migrated();
+		$this->facesInStates(Face::MANUAL_STATE_FOUND, null);
+		$this->manualFaceService->expects($this->never())->method('delete');
+
+		$resp = $this->controller->deleteFaces([100, 101]);
+
+		$this->assertEquals(Http::STATUS_CONFLICT, $resp->getStatus());
+		$this->assertEquals([101], $resp->getData()['faceIds']);
+	}
+
+	/** A marking the analysis confirmed is a face of the analysis now. */
+	public function testAConfirmedMarkingIsNotDeleted() {
+		$this->enableUser();
+		$this->migrated();
+		$this->facesInStates(Face::MANUAL_STATE_CONFIRMED, Face::MANUAL_STATE_FOUND);
+		$this->manualFaceService->expects($this->never())->method('delete');
+
+		$this->assertEquals(Http::STATUS_CONFLICT, $this->controller->deleteFaces([100, 101])->getStatus());
+	}
+
+	public function testDeletingAFaceOfAnotherUserChangesNothing() {
+		$this->enableUser();
+		$this->migrated();
+		$this->facesInStates(Face::MANUAL_STATE_FOUND, Face::MANUAL_STATE_FOUND);
+		$this->manualFaceService->expects($this->never())->method('delete');
+
+		$this->assertEquals(Http::STATUS_FORBIDDEN, $this->controller->deleteFaces([100, 102])->getStatus());
+	}
+
+	public function testDeletingAFaceThatDoesNotExistChangesNothing() {
+		$this->enableUser();
+		$this->migrated();
+		$this->facesInStates(Face::MANUAL_STATE_FOUND, Face::MANUAL_STATE_FOUND);
+		$this->manualFaceService->expects($this->never())->method('delete');
+
+		$this->assertEquals(Http::STATUS_NOT_FOUND, $this->controller->deleteFaces([100, 404])->getStatus());
+	}
+
+	public static function badFaceListProvider(): array {
+		return [
+			'none' => [[]],
+			'not a number' => [['abc']],
+			'too many' => [range(1, 501)],
+		];
+	}
+
+	/** @dataProvider badFaceListProvider */
+	public function testABadListOfFacesIsRefused(array $faceIds) {
+		$this->enableUser();
+		$this->migrated();
+		$this->facesInStates(Face::MANUAL_STATE_FOUND, Face::MANUAL_STATE_FOUND);
+		$this->manualFaceService->expects($this->never())->method('delete');
+		$this->manualFaceService->expects($this->never())->method('ignore');
+
+		$this->assertEquals(Http::STATUS_BAD_REQUEST, $this->controller->deleteFaces($faceIds)->getStatus());
+		$this->assertEquals(Http::STATUS_BAD_REQUEST, $this->controller->ignoreFaces($faceIds)->getStatus());
+	}
+
+	public function testDeletingBeforeTheMigrationIsRefused() {
+		$this->enableUser();
+		$this->faceMapper->method('hasManualStateColumn')->willReturn(false);
+		$this->facesInStates(null, null);
+		$this->manualFaceService->expects($this->never())->method('delete');
+
+		$this->assertEquals(Http::STATUS_SERVICE_UNAVAILABLE, $this->controller->deleteFaces([100])->getStatus());
+	}
+
+	/** Any face of the user can be ignored, one of the analysis as well. */
+	public function testFacesAreIgnored() {
+		$this->enableUser();
+		$this->facesInStates(null, Face::MANUAL_STATE_FOUND);
+		$this->manualFaceService->expects($this->once())->method('ignore')
+			->with(self::USER, 1, $this->callback(function (array $faces): bool {
+				return count($faces) === 2;
+			}))
+			->willReturn([100, 101]);
+
+		$resp = $this->controller->ignoreFaces([100, 101]);
+
+		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
+		$this->assertEquals(['faceIds' => [100, 101]], $resp->getData());
+	}
+
+	public function testIgnoringAFaceOfAnotherUserChangesNothing() {
+		$this->enableUser();
+		$this->facesInStates(null, null);
+		$this->manualFaceService->expects($this->never())->method('ignore');
+
+		$this->assertEquals(Http::STATUS_FORBIDDEN, $this->controller->ignoreFaces([102])->getStatus());
+	}
+
+	public function testFacesAreNotIgnoredAnyMore() {
+		$this->enableUser();
+		$this->facesInStates(null, null);
+		$this->manualFaceService->expects($this->once())->method('unignore')->willReturn([100]);
+
+		$resp = $this->controller->unignoreFaces([100]);
+
+		$this->assertEquals(Http::STATUS_OK, $resp->getStatus());
+		$this->assertEquals(['faceIds' => [100]], $resp->getData());
+	}
+
+	public function testChangingFacesIsRefusedForADisabledUser() {
+		$this->settingsService->method('getUserEnabled')->willReturn(false);
+		$this->manualFaceService->expects($this->never())->method($this->anything());
+
+		$this->assertEquals(Http::STATUS_PRECONDITION_FAILED, $this->controller->deleteFaces([100])->getStatus());
+		$this->assertEquals(Http::STATUS_PRECONDITION_FAILED, $this->controller->ignoreFaces([100])->getStatus());
+		$this->assertEquals(Http::STATUS_PRECONDITION_FAILED, $this->controller->unignoreFaces([100])->getStatus());
+	}
+
 	// --- getFacesForFile --------------------------------------------------
 
 	private function makeFace(int $id, ?int $cluster, int $size, float $confidence, ?bool $groupable, bool $manual, ?string $state, bool $boxAdjusted = false): Face {
@@ -730,6 +892,50 @@ class ManualFaceApiTest extends TestCase {
 	 * When the size of the groups cannot be found out, the faces are still
 	 * given, with the size unknown, and the failure is logged.
 	 */
+	/**
+	 * A face in a hidden group is one the user ignored: it says so, with
+	 * that as the reason it takes no part, and keeps where it came from.
+	 */
+	public function testAnIgnoredFaceIsReportedIgnored() {
+		$this->enableUser();
+		$this->migrated();
+		$this->ownFile();
+
+		$this->faceMapper->method('findFromFile')->willReturn([
+			$this->makeFace(1, 7, 100, 1.0, true, false, null),
+			$this->makeFace(2, 13, 100, 1.02, false, true, Face::MANUAL_STATE_FOUND),
+		]);
+		$this->faceMapper->method('countFacesInClusters')->willReturn([7 => 3, 13 => 1]);
+		$this->clusterMapper->method('findPersonNames')->willReturn([7 => 'Alice', 13 => null]);
+		$this->clusterMapper->method('findHiddenIds')->with(self::USER, [7, 13])->willReturn([13]);
+		$this->manualRegionMapper->method('findByImage')->willReturn([]);
+
+		$faces = $this->facesById($this->controller->getFacesForFile(42)->getData());
+
+		$this->assertFalse($faces[1]['ignored']);
+		$this->assertEquals(['auto', 'participating', null, null], $this->stateOf($faces[1]));
+		$this->assertTrue($faces[2]['ignored']);
+		$this->assertEquals(['manual', 'excluded', 'ignored', Face::MANUAL_STATE_FOUND], $this->stateOf($faces[2]));
+	}
+
+	/** When the ignored faces cannot be found out, that is left open. */
+	public function testFacesForFileAreGivenEvenIfTheIgnoredOnesAreUnknown() {
+		$this->enableUser();
+		$this->migrated();
+		$this->ownFile();
+
+		$this->faceMapper->method('findFromFile')->willReturn([$this->makeFace(1, 7, 100, 1.0, true, false, null)]);
+		$this->faceMapper->method('countFacesInClusters')->willReturn([7 => 3]);
+		$this->clusterMapper->method('findPersonNames')->willReturn([7 => 'Alice']);
+		$this->clusterMapper->method('findHiddenIds')->willThrowException(new \RuntimeException('database gone'));
+		$this->manualRegionMapper->method('findByImage')->willReturn([]);
+
+		$faces = $this->controller->getFacesForFile(42)->getData()['faces'];
+
+		$this->assertNull($faces[0]['ignored']);
+		$this->assertEquals('participating', $faces[0]['clustering']);
+	}
+
 	public function testFacesForFileAreGivenEvenIfTheGroupSizeFails() {
 		$this->enableUser();
 		$this->migrated();
