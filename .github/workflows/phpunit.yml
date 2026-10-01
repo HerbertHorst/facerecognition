@@ -19,7 +19,11 @@ jobs:
       matrix:
         php-versions: ['8.2', '8.3', '8.4', '8.5']
         databases: ['sqlite', 'mysql', 'pgsql']
-        server-versions: ['stable34']
+        server-versions: ['stable34', 'stable35']
+        exclude:
+          # Nextcloud 35 needs PHP 8.3 or later.
+          - php-versions: '8.2'
+            server-versions: 'stable35'
 
     name: php${{ matrix.php-versions }}-${{ matrix.databases }}-${{ matrix.server-versions }}
 
