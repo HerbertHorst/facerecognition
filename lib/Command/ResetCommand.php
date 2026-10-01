@@ -126,7 +126,7 @@ class ResetCommand extends Command {
 	 * @param OutputInterface $output
 	 * @return int
 	 */
-	protected function execute(InputInterface $input, OutputInterface $output) {
+	protected function execute(InputInterface $input, OutputInterface $output): int {
 		// Used to questions.
 		//
 		$this->input = $input;

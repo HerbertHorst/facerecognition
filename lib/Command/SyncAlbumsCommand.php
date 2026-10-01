@@ -116,7 +116,7 @@ class SyncAlbumsCommand extends Command {
 	 * @param OutputInterface $output
 	 * @return int
 	 */
-	protected function execute(InputInterface $input, OutputInterface $output) {
+	protected function execute(InputInterface $input, OutputInterface $output): int {
 		if (!$this->appManager->isEnabledForUser('photos')) {
 			$output->writeln('The photos app is disabled.');
 			return 1;

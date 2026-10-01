@@ -89,7 +89,7 @@ class ProgressCommand extends Command {
 	 * @param OutputInterface $output
 	 * @return int
 	 */
-	protected function execute(InputInterface $input, OutputInterface $output) {
+	protected function execute(InputInterface $input, OutputInterface $output): int {
 		$modelId = $this->settingsService->getCurrentFaceModel();
 		$refinementEnabled = $this->settingsService->getRefinementEnabled();
 
