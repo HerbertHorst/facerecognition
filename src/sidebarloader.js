@@ -23,6 +23,11 @@
 import { defineAsyncComponent, defineCustomElement } from 'vue'
 import { getSidebar } from '@nextcloud/files'
 import { translate as t } from '@nextcloud/l10n'
+import { generateFilePath } from '@nextcloud/router'
+
+// Load the chunks of the tab from where the app is installed: apps/ or custom_apps/
+// eslint-disable-next-line camelcase, no-undef
+__webpack_public_path__ = generateFilePath('facerecognition', '', 'js/')
 
 const TAB_TAG_NAME = 'facerecognition-files-sidebar-tab'
 
